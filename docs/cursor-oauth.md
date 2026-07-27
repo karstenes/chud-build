@@ -58,8 +58,8 @@ Rules:
 - `crates/codegen/xai-grok-shell/src/cursor_auth.rs` — store, PKCE login, refresh,
   logout, `CursorBearerResolver`, proactive refresh
 - `crates/codegen/xai-grok-shell/src/cursor_models.rs` — catalog entries + live
-  `AgentService/GetUsableModels` merge (Bearer), with `api.cursor.com/v0/models`
-  and static fallback as backups
+  `AgentService/GetUsableModels` merge (Bearer); safe composer fallback only
+  (never Cloud Agents `api.cursor.com/v0/models`)
 - `crates/codegen/xai-grok-sampler/src/cursor_agent.rs` — text-only Connect/HTTP2
   `AgentService/Run` streaming (`ApiBackend::CursorAgent`)
 - CLI: `crates/codegen/xai-grok-pager/src/app/cli.rs`,
@@ -82,7 +82,8 @@ IDE slugs like `cursor-grok-4.5-high` are normalized by stripping the
 Connect `not_found`. Auto is `default`. At startup we prefer
 `GetUsableModels` with the OAuth bearer so the picker only offers models this
 account can run; Connect `not_found` / `invalid_argument` / auth codes fail
-fast (no 15× retry loop).
+fast (no 15× retry loop). We never seed the picker from Cloud Agents
+`api.cursor.com/v0/models` — that list advertises ids AgentService rejects.
 
 ### Pulling / refreshing Cursor models
 
@@ -93,13 +94,14 @@ There is no separate CLI “pull models” command. The agent pulls automaticall
 3. After a successful xAI catalog refresh
 
 Check `~/.grok/logs/` (or sampling/unified logs) for
-`merged Cursor models from AgentService GetUsableModels` vs
-`GetUsableModels failed; falling back`. If discovery fails you still get the
-bundled fallback list (composer / grok-4.5-* / gpt-5.4-* / claude-4.6-*).
+`merged Cursor models from AgentService GetUsableModels` (includes a `models=`
+preview) vs `GetUsableModels failed; using safe composer fallback`. If
+discovery fails you only get composer / Auto — not a speculative GPT/Claude/Grok
+list.
 
-If you previously selected `cursor-grok-4.5-high` and got Connect `not_found`,
-switch to **`grok-4.5-high`** (or re-login / restart so the catalog rewrite
-runs). Composer (`composer-2.5`) remains the most reliable free-tier option.
+If a model is missing from that live list, AgentService will not run it for
+this login even if Cursor IDE / Cloud Agents shows it. Stick to ids from the
+GetUsableModels preview (composer and whatever else that line lists).
 
 Credentials are resolved via `CursorBearerResolver` and never through xAI
 `AuthManager`.

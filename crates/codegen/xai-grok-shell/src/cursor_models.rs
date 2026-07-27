@@ -3,8 +3,10 @@
 //! Bundled Cursor entries live in `default_models.json` with
 //! `api_backend = "cursor_agent"`. When the user is logged into Cursor, this
 //! module merges live ids from AgentService `GetUsableModels` (Bearer OAuth
-//! token) so only account-usable wire ids are offered. Falls back to
-//! `api.cursor.com/v0/models` (API key) and then [`FALLBACK_MODELS`].
+//! token) so only account-usable wire ids are offered. Falls back to a
+//! **minimal** safe list (composer / default) — never the Cloud Agents
+//! `api.cursor.com/v0/models` catalog, which advertises ids AgentService/Run
+//! rejects with Connect `not_found`.
 
 use std::collections::HashSet;
 use std::num::NonZeroU64;
@@ -13,8 +15,8 @@ use std::time::Duration;
 use indexmap::IndexMap;
 use xai_grok_config_types::LazinessDetectorPerModelConfig;
 use xai_grok_sampler::cursor_agent::{
-    DEFAULT_CLIENT_VERSION, FALLBACK_MODELS, LEGACY_ALIAS_MODELS, fetch_available_models,
-    fetch_usable_models, normalize_agent_wire_model_id,
+    DEFAULT_CLIENT_VERSION, LEGACY_ALIAS_MODELS, fetch_usable_models,
+    normalize_agent_wire_model_id,
 };
 use xai_grok_sampling_types::ApiBackend;
 
@@ -132,6 +134,10 @@ pub fn normalize_cursor_catalog_keys(catalog: &mut IndexMap<String, ModelEntry>)
 }
 
 /// Merge the static Cursor fallback catalog when the user is logged in.
+///
+/// Uses a **minimal** safe set only. Broader static Cursor catalogs include
+/// named models many accounts cannot run on AgentService; offering them floods
+/// the picker with Connect `not_found` failures.
 pub fn merge_cursor_fallback_catalog(catalog: &mut IndexMap<String, ModelEntry>) {
     if !cursor_auth::is_logged_in() {
         return;
@@ -141,20 +147,32 @@ pub fn merge_cursor_fallback_catalog(catalog: &mut IndexMap<String, ModelEntry>)
     for alias in LEGACY_ALIAS_MODELS {
         catalog.shift_remove(*alias);
     }
-    let ids: Vec<String> = FALLBACK_MODELS.iter().map(|s| (*s).to_string()).collect();
+    // Also drop speculative bundled Cursor entries that were never confirmed
+    // by GetUsableModels for this session.
+    prune_all_cursor_except(catalog, SAFE_FALLBACK_MODELS);
+    let ids: Vec<String> = SAFE_FALLBACK_MODELS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
     merge_cursor_model_ids(catalog, &ids);
 }
 
+/// Models safe to offer when GetUsableModels is unreachable.
+///
+/// Keep this tiny: Composer (and Auto/`default`) are widely available on the
+/// CLI AgentService wire. Named GPT/Claude/Grok ids must come from live
+/// discovery for this account.
+const SAFE_FALLBACK_MODELS: &[&str] = &["composer-2.5", "composer-2-fast", "default"];
+
 /// Fetch live Cursor model ids and merge them into `catalog`.
 ///
-/// Order of preference:
-/// 1. `AgentService/GetUsableModels` with OAuth bearer (matches Run)
-/// 2. `api.cursor.com/v0/models` with API key (Cloud Agents catalog)
-/// 3. [`FALLBACK_MODELS`]
+/// Prefer `AgentService/GetUsableModels` with the OAuth bearer (same wire as
+/// Run). On failure, offer only [`SAFE_FALLBACK_MODELS`] — do **not** merge
+/// `api.cursor.com/v0/models` (Cloud Agents catalog; ids often fail Run).
 ///
-/// When GetUsableModels succeeds with a non-empty list, bundled/fallback
-/// Cursor entries not in that list are pruned so the picker cannot offer
-/// ids that fail Run with Connect `not_found`.
+/// When GetUsableModels succeeds with a non-empty list, **all** Cursor
+/// entries not in that list are pruned so the picker cannot offer ids that
+/// fail Run with Connect `not_found`.
 pub async fn merge_live_cursor_catalog(catalog: &mut IndexMap<String, ModelEntry>) {
     if !cursor_auth::is_logged_in() {
         return;
@@ -166,7 +184,7 @@ pub async fn merge_live_cursor_catalog(catalog: &mut IndexMap<String, ModelEntry
     let client = match build_cursor_http_client() {
         Ok(c) => c,
         Err(error) => {
-            tracing::warn!(%error, "Cursor model client build failed; using fallback catalog");
+            tracing::warn!(%error, "Cursor model client build failed; using safe fallback catalog");
             merge_cursor_fallback_catalog(catalog);
             return;
         }
@@ -175,23 +193,25 @@ pub async fn merge_live_cursor_catalog(catalog: &mut IndexMap<String, ModelEntry
     if let Some(token) = cursor_auth::access_token() {
         match fetch_usable_models_multi_host(&client, &token).await {
             Ok(ids) if !ids.is_empty() => {
+                let preview = ids.iter().take(40).cloned().collect::<Vec<_>>().join(",");
                 tracing::info!(
                     count = ids.len(),
+                    models = %preview,
                     "merged Cursor models from AgentService GetUsableModels"
                 );
-                prune_unavailable_bundled_cursor(catalog, &ids);
+                prune_unavailable_cursor(catalog, &ids);
                 merge_cursor_model_ids(catalog, &ids);
                 return;
             }
             Ok(_) => {
                 tracing::warn!(
-                    "Cursor GetUsableModels returned empty; falling back to secondary catalogs"
+                    "Cursor GetUsableModels returned empty; using safe composer fallback"
                 );
             }
             Err(error) => {
                 tracing::warn!(
                     %error,
-                    "Cursor GetUsableModels failed; falling back to secondary catalogs"
+                    "Cursor GetUsableModels failed; using safe composer fallback"
                 );
             }
         }
@@ -199,11 +219,6 @@ pub async fn merge_live_cursor_catalog(catalog: &mut IndexMap<String, ModelEntry
         tracing::warn!(
             "Cursor is logged in but no access token is available for GetUsableModels"
         );
-    }
-
-    if let Some(api_key) = cursor_api_key_for_catalog() {
-        let ids = fetch_available_models(&client, &api_key).await;
-        merge_cursor_model_ids(catalog, &ids);
     }
 
     merge_cursor_fallback_catalog(catalog);
@@ -250,44 +265,42 @@ fn build_cursor_http_client() -> Result<reqwest::Client, reqwest::Error> {
         .build()
 }
 
-fn prune_unavailable_bundled_cursor(catalog: &mut IndexMap<String, ModelEntry>, usable: &[String]) {
+/// Remove every Cursor AgentService catalog entry whose wire id is not in
+/// `usable` (after normalization). Non-Cursor backends are left alone.
+fn prune_unavailable_cursor(catalog: &mut IndexMap<String, ModelEntry>, usable: &[String]) {
     let usable: HashSet<String> = usable
         .iter()
         .map(|s| normalize_agent_wire_model_id(s))
         .filter(|s| !s.is_empty())
         .collect();
-    let mut bundled: HashSet<&str> = FALLBACK_MODELS.iter().copied().collect();
     for alias in LEGACY_ALIAS_MODELS {
-        bundled.insert(*alias);
+        catalog.shift_remove(*alias);
     }
     catalog.retain(|id, entry| {
         if !(entry.info.api_backend.is_cursor_agent() || entry.info.agent_type == "cursor") {
             return true;
         }
         let wire = normalize_agent_wire_model_id(id);
-        if bundled.contains(id.as_str())
-            || bundled.contains(wire.as_str())
-            || LEGACY_ALIAS_MODELS.contains(&id.as_str())
-        {
-            return usable.contains(id.as_str()) || usable.contains(&wire);
-        }
-        true
+        usable.contains(id.as_str()) || usable.contains(&wire)
     });
 }
 
-fn cursor_api_key_for_catalog() -> Option<String> {
-    for name in ["GROK_CURSOR_API_KEY", "CURSOR_API_KEY"] {
-        if let Ok(value) = std::env::var(name) {
-            let trimmed = value.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_owned());
-            }
-        }
+fn prune_all_cursor_except(catalog: &mut IndexMap<String, ModelEntry>, keep: &[&str]) {
+    let keep: HashSet<String> = keep
+        .iter()
+        .map(|s| normalize_agent_wire_model_id(s))
+        .filter(|s| !s.is_empty())
+        .collect();
+    for alias in LEGACY_ALIAS_MODELS {
+        catalog.shift_remove(*alias);
     }
-    cursor_auth::load_credentials()
-        .ok()
-        .flatten()
-        .and_then(|c| c.api_key)
+    catalog.retain(|id, entry| {
+        if !(entry.info.api_backend.is_cursor_agent() || entry.info.agent_type == "cursor") {
+            return true;
+        }
+        let wire = normalize_agent_wire_model_id(id);
+        keep.contains(id.as_str()) || keep.contains(&wire)
+    });
 }
 
 /// Ensure cursor models remain tagged correctly after remote prefetch overlays.
@@ -370,7 +383,7 @@ mod tests {
     }
 
     #[test]
-    fn prune_removes_unusable_bundled_and_legacy_aliases() {
+    fn prune_removes_all_unusable_cursor_entries() {
         let mut catalog = IndexMap::new();
         catalog.insert("composer-2.5".to_owned(), cursor_model_entry("composer-2.5"));
         catalog.insert(
@@ -378,12 +391,22 @@ mod tests {
             cursor_model_entry("gpt-5.4-medium"),
         );
         catalog.insert("sonnet-4.6".to_owned(), cursor_model_entry("sonnet-4.6"));
-        catalog.insert("custom-cursor".to_owned(), cursor_model_entry("custom-cursor"));
-        prune_unavailable_bundled_cursor(&mut catalog, &["composer-2.5".to_owned()]);
+        catalog.insert(
+            "gpt-5.6-luna-high".to_owned(),
+            cursor_model_entry("gpt-5.6-luna-high"),
+        );
+        // Non-Cursor backend must survive.
+        let mut xai = cursor_model_entry("ignored");
+        xai.info.api_backend = ApiBackend::Responses;
+        xai.info.agent_type = "grok-build".to_owned();
+        catalog.insert("grok-4.5".to_owned(), xai);
+
+        prune_unavailable_cursor(&mut catalog, &["composer-2.5".to_owned()]);
         assert!(catalog.contains_key("composer-2.5"));
-        assert!(catalog.contains_key("custom-cursor"));
+        assert!(catalog.contains_key("grok-4.5"));
         assert!(!catalog.contains_key("gpt-5.4-medium"));
         assert!(!catalog.contains_key("sonnet-4.6"));
+        assert!(!catalog.contains_key("gpt-5.6-luna-high"));
     }
 
     #[test]
@@ -393,10 +416,20 @@ mod tests {
             "grok-4.5-high".to_owned(),
             cursor_model_entry("grok-4.5-high"),
         );
-        prune_unavailable_bundled_cursor(
-            &mut catalog,
-            &["cursor-grok-4.5-high".to_owned()],
-        );
+        prune_unavailable_cursor(&mut catalog, &["cursor-grok-4.5-high".to_owned()]);
         assert!(catalog.contains_key("grok-4.5-high"));
+    }
+
+    #[test]
+    fn safe_fallback_keeps_only_composer() {
+        let mut catalog = IndexMap::new();
+        catalog.insert(
+            "gpt-5.6-luna-high".to_owned(),
+            cursor_model_entry("gpt-5.6-luna-high"),
+        );
+        catalog.insert("composer-2.5".to_owned(), cursor_model_entry("composer-2.5"));
+        prune_all_cursor_except(&mut catalog, SAFE_FALLBACK_MODELS);
+        assert!(catalog.contains_key("composer-2.5"));
+        assert!(!catalog.contains_key("gpt-5.6-luna-high"));
     }
 }
