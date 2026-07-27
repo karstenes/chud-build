@@ -212,6 +212,9 @@ pub fn stream_cursor_agent(
     base_url: String,
     client_version: String,
     model: String,
+    // Session `/effort` (or `/reasoning`) override. Wins over any effort
+    // suffix peeled from `model`.
+    effort_override: Option<String>,
     prompt: String,
     cwd: String,
     request_id: RequestId,
@@ -227,8 +230,16 @@ pub fn stream_cursor_agent(
         };
 
         // Catalog may use compound slugs (`grok-4.5-high-fast`); Run wants
-        // base id + effort/fast ModelDetails params (SDK/ACP shape).
-        let selection = resolve_agent_model_selection(&model);
+        // base id + effort/fast ModelDetails params (SDK/ACP shape). Session
+        // `/effort` overrides any peeled suffix.
+        let mut selection = resolve_agent_model_selection(&model);
+        if let Some(effort) = effort_override
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            selection.effort = Some(effort.to_owned());
+        }
         tracing::info!(
             target: crate::sampling_log::TARGET,
             event = "cursor_agent_model_selection",
@@ -236,6 +247,7 @@ pub fn stream_cursor_agent(
             wire_model = %selection.model_id,
             effort = selection.effort.as_deref().unwrap_or(""),
             fast = selection.fast,
+            effort_override = effort_override.as_deref().unwrap_or(""),
             "resolved Cursor AgentService model selection"
         );
         let model = selection.model_id.clone();
@@ -1430,6 +1442,19 @@ mod tests {
                 fast: false,
             }
         );
+    }
+
+    #[test]
+    fn resolve_then_effort_override_wins_over_suffix() {
+        let mut selection = resolve_agent_model_selection("grok-4.5-medium");
+        assert_eq!(selection.effort.as_deref(), Some("medium"));
+        selection.effort = Some("high".into());
+        let frames = build_run_frames("hi", &selection, "/tmp");
+        let hay = String::from_utf8_lossy(&frames[0]);
+        assert!(hay.contains("grok-4.5"));
+        assert!(hay.contains("effort"));
+        assert!(hay.contains("high"));
+        assert!(!hay.contains("grok-4.5-medium"));
     }
 
     #[test]

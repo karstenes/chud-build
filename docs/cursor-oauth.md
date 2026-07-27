@@ -75,11 +75,12 @@ in (`cursor-auth.json` or `CURSOR_API_KEY`). Inference goes to
 `https://agentn.global.api5.cursor.sh` over HTTP/2 Connect protobuf
 (`AgentService/Run`); tools are deferred (text-only first cut).
 
-Model ids must be AgentService **wire** ids. Catalog/Cloud Agents often use
-compound slugs (`cursor-grok-4.5-high-fast`); at Run time we split those into
-a **base** id plus ModelDetails params (`effort`, `fast`), matching Cursor
-ACP/SDK (`grok-4.5[effort=high,fast=false]`). Bare models like `composer-2.5`
-and `gemini-3.1-pro` have no effort param. Auto is `default`.
+Compound GetUsableModels / Cloud Agents slugs (`cursor-grok-4.5-high-fast`)
+are collapsed to a **base** picker entry (e.g. `cursor-grok-4.5`, wire model
+`grok-4.5`) with a `reasoning_efforts` menu. Use **`/effort`** or **`/reasoning`**
+to change the level — same UX as xAI Responses `grok-4.5`. At Run time we send
+base id + ModelDetails `effort` / `fast` params (ACP/SDK shape). Bare models
+like `composer-2.5` and `gemini-3.1-pro` have no effort menu. Auto is `default`.
 
 At startup we prefer `GetUsableModels` with the OAuth bearer so the picker only
 offers models this account can run; Connect `not_found` / `invalid_argument` /

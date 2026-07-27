@@ -4321,7 +4321,7 @@ impl ModelInfo {
     /// a menu-only model as supported. The single derive site; `to_acp_model_info`
     /// then just reads these fields. Idempotent (the remote/CCP path already sets
     /// them); the empty-list path leaves both legacy fields untouched.
-    fn derive_reasoning_effort_fields(&mut self) {
+    pub(crate) fn derive_reasoning_effort_fields(&mut self) {
         if self.reasoning_efforts.is_empty() {
             return;
         }

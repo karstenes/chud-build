@@ -2001,6 +2001,9 @@ impl SamplingClient {
             .model
             .clone()
             .unwrap_or_else(|| self.defaults.model.clone());
+        let effort_override = request
+            .reasoning_effort
+            .map(|effort| effort.as_str().to_string());
         let prompt = crate::cursor_agent::build_prompt_from_conversation(&request);
         let cwd = std::env::current_dir()
             .map(|p| p.display().to_string())
@@ -2012,6 +2015,7 @@ impl SamplingClient {
             self.base_url.clone(),
             crate::cursor_agent::DEFAULT_CLIENT_VERSION.to_string(),
             model,
+            effort_override,
             prompt,
             cwd,
             request_id,

@@ -84,100 +84,100 @@
       "auto_compact_threshold_percent": 80
     },
     {
-      "id": "grok-4.5-high",
-      "model": "grok-4.5-high",
-      "name": "Grok 4.5 High (Cursor)",
-      "description": "Cursor-hosted Grok 4.5 high via AgentService/Run (wire id; not cursor-grok-*)",
+      "id": "cursor-grok-4.5",
+      "model": "grok-4.5",
+      "name": "Grok 4.5 (Cursor)",
+      "description": "Cursor-hosted Grok 4.5 via AgentService/Run; use /effort or /reasoning for levels",
       "context_window": 500000,
       "api_backend": "cursor_agent",
       "agent_type": "cursor",
       "supported_in_api": false,
       "supports_backend_search": false,
-      "system_prompt_label": "Grok 4.5 High",
+      "system_prompt_label": "Grok 4.5",
       "show_model_fingerprint": false,
-      "supports_reasoning_effort": false,
+      "supports_reasoning_effort": true,
+      "reasoning_effort": "high",
+      "reasoning_efforts": [
+        {
+          "value": "medium",
+          "label": "Medium Effort",
+          "description": "Balanced reasoning"
+        },
+        {
+          "value": "high",
+          "label": "High Effort",
+          "description": "Heavy reasoning",
+          "default": true
+        },
+        {
+          "value": "xhigh",
+          "label": "Extra High Effort",
+          "description": "Extended reasoning"
+        }
+      ],
       "auto_compact_threshold_percent": 80
     },
     {
-      "id": "grok-4.5-medium",
-      "model": "grok-4.5-medium",
-      "name": "Grok 4.5 Medium (Cursor)",
-      "description": "Cursor-hosted Grok 4.5 medium via AgentService/Run",
+      "id": "cursor-grok-4.5-fast",
+      "model": "grok-4.5-fast",
+      "name": "Grok 4.5 Fast (Cursor)",
+      "description": "Cursor-hosted Grok 4.5 fast via AgentService/Run; use /effort or /reasoning",
       "context_window": 500000,
       "api_backend": "cursor_agent",
       "agent_type": "cursor",
       "supported_in_api": false,
       "supports_backend_search": false,
-      "system_prompt_label": "Grok 4.5 Medium",
+      "system_prompt_label": "Grok 4.5 Fast",
       "show_model_fingerprint": false,
-      "supports_reasoning_effort": false,
+      "supports_reasoning_effort": true,
+      "reasoning_effort": "high",
+      "reasoning_efforts": [
+        {
+          "value": "medium",
+          "label": "Medium Effort",
+          "description": "Balanced reasoning"
+        },
+        {
+          "value": "high",
+          "label": "High Effort",
+          "description": "Heavy reasoning",
+          "default": true
+        },
+        {
+          "value": "xhigh",
+          "label": "Extra High Effort",
+          "description": "Extended reasoning"
+        }
+      ],
       "auto_compact_threshold_percent": 80
     },
     {
-      "id": "grok-4.5-high-fast",
-      "model": "grok-4.5-high-fast",
-      "name": "Grok 4.5 High Fast (Cursor)",
-      "description": "Cursor-hosted Grok 4.5 high-fast via AgentService/Run",
-      "context_window": 500000,
-      "api_backend": "cursor_agent",
-      "agent_type": "cursor",
-      "supported_in_api": false,
-      "supports_backend_search": false,
-      "system_prompt_label": "Grok 4.5 High Fast",
-      "show_model_fingerprint": false,
-      "supports_reasoning_effort": false,
-      "auto_compact_threshold_percent": 80
-    },
-    {
-      "id": "gpt-5.4-high",
-      "model": "gpt-5.4-high",
-      "name": "GPT-5.4 High",
-      "description": "Cursor-hosted GPT-5.4 (high) via AgentService/Run",
+      "id": "gpt-5.4",
+      "model": "gpt-5.4",
+      "name": "GPT-5.4 (Cursor)",
+      "description": "Cursor-hosted GPT-5.4 via AgentService/Run; use /effort or /reasoning",
       "context_window": 200000,
       "api_backend": "cursor_agent",
       "agent_type": "cursor",
       "supported_in_api": false,
       "supports_backend_search": false,
-      "system_prompt_label": "GPT-5.4 High",
+      "system_prompt_label": "GPT-5.4",
       "show_model_fingerprint": false,
-      "supports_reasoning_effort": false,
+      "supports_reasoning_effort": true,
+      "reasoning_effort": "high",
+      "reasoning_efforts": [
+        { "value": "low", "label": "Low Effort" },
+        { "value": "medium", "label": "Medium Effort" },
+        { "value": "high", "label": "High Effort", "default": true },
+        { "value": "xhigh", "label": "Extra High Effort" }
+      ],
       "auto_compact_threshold_percent": 80
     },
     {
-      "id": "gpt-5.4-medium",
-      "model": "gpt-5.4-medium",
-      "name": "GPT-5.4 Medium",
-      "description": "Cursor-hosted GPT-5.4 (medium) via AgentService/Run",
-      "context_window": 200000,
-      "api_backend": "cursor_agent",
-      "agent_type": "cursor",
-      "supported_in_api": false,
-      "supports_backend_search": false,
-      "system_prompt_label": "GPT-5.4 Medium",
-      "show_model_fingerprint": false,
-      "supports_reasoning_effort": false,
-      "auto_compact_threshold_percent": 80
-    },
-    {
-      "id": "gpt-5.4-low",
-      "model": "gpt-5.4-low",
-      "name": "GPT-5.4 Low",
-      "description": "Cursor-hosted GPT-5.4 (low) via AgentService/Run",
-      "context_window": 200000,
-      "api_backend": "cursor_agent",
-      "agent_type": "cursor",
-      "supported_in_api": false,
-      "supports_backend_search": false,
-      "system_prompt_label": "GPT-5.4 Low",
-      "show_model_fingerprint": false,
-      "supports_reasoning_effort": false,
-      "auto_compact_threshold_percent": 80
-    },
-    {
-      "id": "claude-4.6-sonnet-medium",
-      "model": "claude-4.6-sonnet-medium",
-      "name": "Claude 4.6 Sonnet Medium",
-      "description": "Cursor-hosted Claude Sonnet 4.6 via AgentService/Run",
+      "id": "claude-4.6-sonnet",
+      "model": "claude-4.6-sonnet",
+      "name": "Claude 4.6 Sonnet (Cursor)",
+      "description": "Cursor-hosted Claude Sonnet 4.6 via AgentService/Run; use /effort or /reasoning",
       "context_window": 200000,
       "api_backend": "cursor_agent",
       "agent_type": "cursor",
@@ -185,13 +185,17 @@
       "supports_backend_search": false,
       "system_prompt_label": "Claude 4.6 Sonnet",
       "show_model_fingerprint": false,
-      "supports_reasoning_effort": false,
+      "supports_reasoning_effort": true,
+      "reasoning_effort": "medium",
+      "reasoning_efforts": [
+        { "value": "medium", "label": "Medium Effort", "default": true }
+      ],
       "auto_compact_threshold_percent": 80
     },
     {
-      "id": "claude-4.6-sonnet-medium-thinking",
+      "id": "claude-4.6-sonnet-thinking",
       "model": "claude-4.6-sonnet-medium-thinking",
-      "name": "Claude 4.6 Sonnet Medium Thinking",
+      "name": "Claude 4.6 Sonnet Thinking (Cursor)",
       "description": "Cursor-hosted Claude Sonnet 4.6 Thinking via AgentService/Run",
       "context_window": 200000,
       "api_backend": "cursor_agent",
@@ -204,10 +208,10 @@
       "auto_compact_threshold_percent": 80
     },
     {
-      "id": "claude-4.6-opus-high",
-      "model": "claude-4.6-opus-high",
-      "name": "Claude 4.6 Opus High",
-      "description": "Cursor-hosted Claude Opus 4.6 via AgentService/Run",
+      "id": "claude-4.6-opus",
+      "model": "claude-4.6-opus",
+      "name": "Claude 4.6 Opus (Cursor)",
+      "description": "Cursor-hosted Claude Opus 4.6 via AgentService/Run; use /effort or /reasoning",
       "context_window": 200000,
       "api_backend": "cursor_agent",
       "agent_type": "cursor",
@@ -215,7 +219,12 @@
       "supports_backend_search": false,
       "system_prompt_label": "Claude 4.6 Opus",
       "show_model_fingerprint": false,
-      "supports_reasoning_effort": false,
+      "supports_reasoning_effort": true,
+      "reasoning_effort": "high",
+      "reasoning_efforts": [
+        { "value": "high", "label": "High Effort", "default": true },
+        { "value": "max", "label": "Max Effort" }
+      ],
       "auto_compact_threshold_percent": 80
     },
     {
