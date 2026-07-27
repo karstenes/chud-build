@@ -247,7 +247,9 @@ impl SamplingError {
                 matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504 | 520)
             }
             SamplingError::EventStreamError(_) => true,
-            SamplingError::StreamError { .. } => true,
+            SamplingError::StreamError { error_type, .. } => {
+                is_retryable_stream_error_type(error_type)
+            }
             SamplingError::IdleTimeout { .. } => false,
             SamplingError::EmptyResponse { .. } => true,
             SamplingError::MaxTokensTruncation => false,
@@ -432,6 +434,36 @@ pub fn is_context_length_error(message: &str) -> bool {
         || m.contains("context_length_exceeded")
 }
 
+/// Connect / gRPC-style stream error codes that are deterministic for a given
+/// request (wrong model id, auth, bad args). Retrying the same payload cannot
+/// help — Cursor AgentService returns these as end-stream Connect errors.
+pub fn is_retryable_stream_error_type(error_type: &str) -> bool {
+    !matches!(
+        error_type,
+        "not_found"
+            | "invalid_argument"
+            | "permission_denied"
+            | "unauthenticated"
+            | "failed_precondition"
+            | "already_exists"
+            | "out_of_range"
+            | "unimplemented"
+            | "cancelled"
+    )
+}
+
+/// Parse a [`SamplingError::StreamError`] Display back into `(error_type, message)`.
+///
+/// Format: `stream error ({error_type}): {message}` (see the thiserror template).
+pub fn parse_stream_error_display(message: &str) -> Option<(String, String)> {
+    let rest = message.strip_prefix("stream error (")?;
+    let (code, msg) = rest.split_once("): ")?;
+    if code.is_empty() {
+        return None;
+    }
+    Some((code.to_string(), msg.to_string()))
+}
+
 /// Decide whether a [`reqwest::Error`] is worth retrying.
 pub fn is_retryable_reqwest(err: &reqwest::Error) -> bool {
     if err.is_timeout() || err.is_connect() {
@@ -534,6 +566,33 @@ mod tests {
         // Verify the existing contract hasn't changed — EventStreamError is retryable.
         let err = SamplingError::EventStreamError("connection reset".into());
         assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn stream_error_not_found_is_not_retryable() {
+        let err = SamplingError::StreamError {
+            error_type: "not_found".into(),
+            message: "Error".into(),
+        };
+        assert!(
+            !err.is_retryable(),
+            "Connect not_found (unknown/unavailable model) must fail fast"
+        );
+        assert!(!is_retryable_stream_error_type("invalid_argument"));
+        assert!(!is_retryable_stream_error_type("unauthenticated"));
+        assert!(is_retryable_stream_error_type("unavailable"));
+        assert!(is_retryable_stream_error_type("internal"));
+    }
+
+    #[test]
+    fn parse_stream_error_display_round_trips() {
+        let err = SamplingError::StreamError {
+            error_type: "not_found".into(),
+            message: "Error".into(),
+        };
+        let (code, msg) = parse_stream_error_display(&err.to_string()).expect("parse");
+        assert_eq!(code, "not_found");
+        assert_eq!(msg, "Error");
     }
 
     #[test]

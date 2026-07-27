@@ -732,6 +732,17 @@ fn synthesize_from_info(info: &SamplingErrorInfo) -> SamplingError {
         }
         SamplingErrorKind::Http => SamplingError::EventStreamError(info.message.clone()),
         SamplingErrorKind::Api | SamplingErrorKind::RateLimited => {
+            // Cursor AgentService Failed events are StreamError → Api kind with
+            // no raw ErrorCell. Rebuild StreamError from Display so Connect
+            // `not_found` stays non-retryable instead of becoming Api(500).
+            if let Some((error_type, message)) =
+                xai_grok_sampling_types::parse_stream_error_display(&info.message)
+            {
+                return SamplingError::StreamError {
+                    error_type,
+                    message,
+                };
+            }
             let status = info
                 .status_code
                 .and_then(|c| reqwest::StatusCode::from_u16(c).ok())
@@ -934,6 +945,27 @@ mod tests {
             }
             other => panic!("expected Api, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn synthesize_stream_error_display_stays_stream_error() {
+        let original = SamplingError::StreamError {
+            error_type: "not_found".into(),
+            message: "Error".into(),
+        };
+        let info = SamplingErrorInfo::from(&original);
+        let err = synthesize_from_info(&info);
+        match &err {
+            SamplingError::StreamError {
+                error_type,
+                message,
+            } => {
+                assert_eq!(error_type, "not_found");
+                assert_eq!(message, "Error");
+            }
+            other => panic!("expected StreamError, got {other:?}"),
+        }
+        assert!(!err.is_retryable());
     }
 
     #[test]

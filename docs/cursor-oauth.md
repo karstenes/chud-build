@@ -40,7 +40,8 @@ Rules:
 - `crates/codegen/xai-grok-shell/src/cursor_auth.rs` — store, PKCE login, refresh,
   logout, `CursorBearerResolver`, proactive refresh
 - `crates/codegen/xai-grok-shell/src/cursor_models.rs` — catalog entries + live
-  `api.cursor.com/v0/models` merge
+  `AgentService/GetUsableModels` merge (Bearer), with `api.cursor.com/v0/models`
+  and static fallback as backups
 - `crates/codegen/xai-grok-sampler/src/cursor_agent.rs` — text-only Connect/HTTP2
   `AgentService/Run` streaming (`ApiBackend::CursorAgent`)
 - CLI: `crates/codegen/xai-grok-pager/src/app/cli.rs`,
@@ -55,6 +56,13 @@ Cursor models in `default_models.json` use `"api_backend": "cursor_agent"` and
 in (`cursor-auth.json` or `CURSOR_API_KEY`). Inference goes to
 `https://agentn.global.api5.cursor.sh` over HTTP/2 Connect protobuf
 (`AgentService/Run`); tools are deferred (text-only first cut).
+
+Model ids must be AgentService **wire** ids (for example `gpt-5.4-medium`,
+`claude-4.6-sonnet-medium`, `composer-2.5`). Short aliases like `sonnet-4.6`
+fail Run with Connect `not_found`. Auto is `default`. At startup we prefer
+`GetUsableModels` with the OAuth bearer so the picker only offers models this
+account can run; Connect `not_found` / `invalid_argument` / auth codes fail
+fast (no 15× retry loop).
 
 Credentials are resolved via `CursorBearerResolver` and never through xAI
 `AuthManager`.

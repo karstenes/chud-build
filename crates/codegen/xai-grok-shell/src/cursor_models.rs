@@ -2,15 +2,19 @@
 //!
 //! Bundled Cursor entries live in `default_models.json` with
 //! `api_backend = "cursor_agent"`. When the user is logged into Cursor, this
-//! module can also merge live ids from `api.cursor.com/v0/models` (Basic auth
-//! with the Cursor API key) so newly published Cursor models appear without a
-//! CLI upgrade.
+//! module merges live ids from AgentService `GetUsableModels` (Bearer OAuth
+//! token) so only account-usable wire ids are offered. Falls back to
+//! `api.cursor.com/v0/models` (API key) and then [`FALLBACK_MODELS`].
 
+use std::collections::HashSet;
 use std::num::NonZeroU64;
 
 use indexmap::IndexMap;
 use xai_grok_config_types::LazinessDetectorPerModelConfig;
-use xai_grok_sampler::cursor_agent::{FALLBACK_MODELS, fetch_available_models};
+use xai_grok_sampler::cursor_agent::{
+    DEFAULT_CLIENT_VERSION, FALLBACK_MODELS, LEGACY_ALIAS_MODELS, fetch_available_models,
+    fetch_usable_models,
+};
 use xai_grok_sampling_types::ApiBackend;
 
 use crate::agent::config::{ModelEntry, ModelInfo, default_agent_type};
@@ -95,22 +99,29 @@ pub fn merge_cursor_fallback_catalog(catalog: &mut IndexMap<String, ModelEntry>)
     if !cursor_auth::is_logged_in() {
         return;
     }
+    // Drop short aliases that AgentService rejects with Connect not_found.
+    for alias in LEGACY_ALIAS_MODELS {
+        catalog.shift_remove(*alias);
+    }
     let ids: Vec<String> = FALLBACK_MODELS.iter().map(|s| (*s).to_string()).collect();
     merge_cursor_model_ids(catalog, &ids);
 }
 
-/// Fetch live Cursor model ids (Basic `api_key:`) and merge them into `catalog`.
+/// Fetch live Cursor model ids and merge them into `catalog`.
 ///
-/// Falls back to [`FALLBACK_MODELS`] when the network call fails. No-op when
-/// Cursor is not logged in or no API key is available for Basic auth.
+/// Order of preference:
+/// 1. `AgentService/GetUsableModels` with OAuth bearer (matches Run)
+/// 2. `api.cursor.com/v0/models` with API key (Cloud Agents catalog)
+/// 3. [`FALLBACK_MODELS`]
+///
+/// When GetUsableModels succeeds with a non-empty list, bundled/fallback
+/// Cursor entries not in that list are pruned so the picker cannot offer
+/// ids that fail Run with Connect `not_found`.
 pub async fn merge_live_cursor_catalog(catalog: &mut IndexMap<String, ModelEntry>) {
     if !cursor_auth::is_logged_in() {
         return;
     }
-    let Some(api_key) = cursor_api_key_for_catalog() else {
-        merge_cursor_fallback_catalog(catalog);
-        return;
-    };
+
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
@@ -121,8 +132,62 @@ pub async fn merge_live_cursor_catalog(catalog: &mut IndexMap<String, ModelEntry
             return;
         }
     };
-    let ids = fetch_available_models(&client, &api_key).await;
-    merge_cursor_model_ids(catalog, &ids);
+
+    if let Some(token) = cursor_auth::access_token() {
+        match fetch_usable_models(
+            &client,
+            &token,
+            &cursor_auth::agent_base_url(),
+            DEFAULT_CLIENT_VERSION,
+        )
+        .await
+        {
+            Ok(ids) if !ids.is_empty() => {
+                tracing::info!(
+                    count = ids.len(),
+                    "merged Cursor models from AgentService GetUsableModels"
+                );
+                prune_unavailable_bundled_cursor(catalog, &ids);
+                merge_cursor_model_ids(catalog, &ids);
+                return;
+            }
+            Ok(_) => {
+                tracing::warn!(
+                    "Cursor GetUsableModels returned empty; falling back to secondary catalogs"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "Cursor GetUsableModels failed; falling back to secondary catalogs"
+                );
+            }
+        }
+    }
+
+    if let Some(api_key) = cursor_api_key_for_catalog() {
+        let ids = fetch_available_models(&client, &api_key).await;
+        merge_cursor_model_ids(catalog, &ids);
+    }
+
+    merge_cursor_fallback_catalog(catalog);
+}
+
+fn prune_unavailable_bundled_cursor(catalog: &mut IndexMap<String, ModelEntry>, usable: &[String]) {
+    let usable: HashSet<&str> = usable.iter().map(|s| s.as_str()).collect();
+    let mut bundled: HashSet<&str> = FALLBACK_MODELS.iter().copied().collect();
+    for alias in LEGACY_ALIAS_MODELS {
+        bundled.insert(*alias);
+    }
+    catalog.retain(|id, entry| {
+        if !(entry.info.api_backend.is_cursor_agent() || entry.info.agent_type == "cursor") {
+            return true;
+        }
+        if bundled.contains(id.as_str()) || LEGACY_ALIAS_MODELS.contains(&id.as_str()) {
+            return usable.contains(id.as_str());
+        }
+        true
+    });
 }
 
 fn cursor_api_key_for_catalog() -> Option<String> {
@@ -179,10 +244,27 @@ mod tests {
             &[
                 "composer-2.5".to_owned(),
                 "default".to_owned(),
-                "opus-4.6".to_owned(),
+                "claude-4.6-opus-high".to_owned(),
             ],
         );
         assert_eq!(catalog.len(), 2);
-        assert!(catalog.contains_key("opus-4.6"));
+        assert!(catalog.contains_key("claude-4.6-opus-high"));
+    }
+
+    #[test]
+    fn prune_removes_unusable_bundled_and_legacy_aliases() {
+        let mut catalog = IndexMap::new();
+        catalog.insert("composer-2.5".to_owned(), cursor_model_entry("composer-2.5"));
+        catalog.insert(
+            "gpt-5.4-medium".to_owned(),
+            cursor_model_entry("gpt-5.4-medium"),
+        );
+        catalog.insert("sonnet-4.6".to_owned(), cursor_model_entry("sonnet-4.6"));
+        catalog.insert("custom-cursor".to_owned(), cursor_model_entry("custom-cursor"));
+        prune_unavailable_bundled_cursor(&mut catalog, &["composer-2.5".to_owned()]);
+        assert!(catalog.contains_key("composer-2.5"));
+        assert!(catalog.contains_key("custom-cursor"));
+        assert!(!catalog.contains_key("gpt-5.4-medium"));
+        assert!(!catalog.contains_key("sonnet-4.6"));
     }
 }

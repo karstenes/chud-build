@@ -46,7 +46,11 @@ pub const DEFAULT_AGENT_BASE_URL: &str = "https://agentn.global.api5.cursor.sh";
 /// served `cursor-agent` CLI build.
 pub const DEFAULT_CLIENT_VERSION: &str = "cli-2026.07.08-0c04a8a";
 
-/// Static fallback catalog when `api.cursor.com/v0/models` is unreachable.
+/// Static fallback catalog when live discovery is unreachable.
+///
+/// IDs must match Cursor AgentService wire ids (`cursor-agent models` /
+/// `GetUsableModels`), not short aliases. Wrong ids fail Run with Connect
+/// `not_found`.
 pub const FALLBACK_MODELS: &[&str] = &[
     "composer-2.5",
     "composer-2-fast",
@@ -54,14 +58,20 @@ pub const FALLBACK_MODELS: &[&str] = &[
     "gpt-5.4-high",
     "gpt-5.4-medium",
     "gpt-5.4-low",
-    "sonnet-4.6",
-    "sonnet-4.6-thinking",
-    "opus-4.6",
+    "claude-4.6-sonnet-medium",
+    "claude-4.6-sonnet-medium-thinking",
+    "claude-4.6-opus-high",
     "gemini-3.1-pro",
     "default",
 ];
 
+/// Former short aliases that must never be advertised; pruned when live
+/// discovery succeeds.
+pub const LEGACY_ALIAS_MODELS: &[&str] =
+    &["sonnet-4.6", "sonnet-4.6-thinking", "opus-4.6"];
+
 const AGENT_PATH: &str = "/agent.v1.AgentService/Run";
+const GET_USABLE_MODELS_PATH: &str = "/agent.v1.AgentService/GetUsableModels";
 const MODELS_API_URL: &str = "https://api.cursor.com/v0/models";
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -367,6 +377,7 @@ pub fn stream_cursor_agent(
         }
 
         if let Some(err) = failure {
+            let err = enrich_cursor_stream_error(err, &model);
             tracing::warn!(
                 target: crate::sampling_log::TARGET,
                 event = "cursor_agent_failed",
@@ -508,6 +519,9 @@ pub fn build_prompt_from_conversation(request: &ConversationRequest) -> String {
 
 /// Fetch live model ids from `api.cursor.com` (Basic auth with `api_key:`).
 /// Falls back to [`FALLBACK_MODELS`] on error.
+///
+/// Prefer [`fetch_usable_models`] for AgentService/Run — that catalog is what
+/// Run accepts. This Cloud Agents list can advertise ids the CLI wire rejects.
 pub async fn fetch_available_models(client: &reqwest::Client, api_key: &str) -> Vec<String> {
     match fetch_available_models_inner(client, api_key).await {
         Ok(models) if !models.is_empty() => models,
@@ -540,6 +554,119 @@ async fn fetch_available_models_inner(
         .map(|m| m.trim().to_string())
         .filter(|m| !m.is_empty())
         .collect())
+}
+
+/// Fetch account-usable AgentService model ids via unary
+/// `AgentService/GetUsableModels` (Bearer access token, `application/proto`).
+///
+/// This is the authoritative catalog for [`stream_cursor_agent`]. Returns
+/// `Err` on transport/HTTP failure and `Ok(vec![])` only when the response
+/// decodes successfully with no models.
+pub async fn fetch_usable_models(
+    client: &reqwest::Client,
+    access_token: &str,
+    base_url: &str,
+    client_version: &str,
+) -> Result<Vec<String>, String> {
+    let url = format!(
+        "{}{}",
+        base_url.trim_end_matches('/'),
+        GET_USABLE_MODELS_PATH
+    );
+    let response = client
+        .post(&url)
+        .bearer_auth(access_token)
+        .header("content-type", "application/proto")
+        .header("te", "trailers")
+        .header("x-cursor-client-type", "cli")
+        .header("x-cursor-client-version", client_version)
+        .header("x-ghost-mode", "true")
+        // Empty GetUsableModelsRequest protobuf.
+        .body(Vec::<u8>::new())
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("HTTP {}", response.status()));
+    }
+    let bytes = response.bytes().await.map_err(|e| e.to_string())?;
+    decode_usable_models_response(&bytes)
+}
+
+fn decode_usable_models_response(payload: &[u8]) -> Result<Vec<String>, String> {
+    let body = connect_unary_payload(payload).unwrap_or(payload);
+    let mut models = Vec::new();
+    for field in iter_fields(body) {
+        if field.field != 1 || field.wire != 2 {
+            continue;
+        }
+        if let Some(id) = extract_model_details_id(field.data) {
+            let id = id.trim();
+            if !id.is_empty() {
+                models.push(id.to_string());
+            }
+        }
+    }
+    Ok(models)
+}
+
+/// Prefer a Connect unary data frame when present; otherwise treat `payload`
+/// as a raw protobuf body.
+fn connect_unary_payload(payload: &[u8]) -> Option<&[u8]> {
+    if payload.len() < 5 {
+        return None;
+    }
+    let mut offset = 0;
+    while offset + 5 <= payload.len() {
+        let flags = payload[offset];
+        let len = u32::from_be_bytes([
+            payload[offset + 1],
+            payload[offset + 2],
+            payload[offset + 3],
+            payload[offset + 4],
+        ]) as usize;
+        let frame_end = offset + 5 + len;
+        if frame_end > payload.len() {
+            return None;
+        }
+        if flags & FLAG_GZIP != 0 {
+            return None;
+        }
+        if flags & FLAG_END == 0 {
+            return Some(&payload[offset + 5..frame_end]);
+        }
+        offset = frame_end;
+    }
+    None
+}
+
+fn extract_model_details_id(model_details: &[u8]) -> Option<String> {
+    for field in iter_fields(model_details) {
+        if field.field == 1 && field.wire == 2 {
+            return std::str::from_utf8(field.data)
+                .ok()
+                .map(|s| s.to_string());
+        }
+    }
+    None
+}
+
+fn enrich_cursor_stream_error(err: SamplingError, model: &str) -> SamplingError {
+    match err {
+        SamplingError::StreamError {
+            error_type,
+            message,
+        } if error_type == "not_found" => SamplingError::StreamError {
+            error_type,
+            message: format!(
+                "Cursor model '{model}' is not available for this account/session \
+                 (Connect not_found). Pick a model from AgentService GetUsableModels \
+                 (composer-* usually works) or upgrade the Cursor plan that entitles it. \
+                 Upstream: {message}"
+            ),
+        },
+        other => other,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1032,5 +1159,34 @@ mod tests {
     #[test]
     fn heartbeat_is_stable() {
         assert_eq!(&heartbeat_frame()[..], &[0, 0, 0, 0, 2, 0x3a, 0x00]);
+    }
+
+    #[test]
+    fn decode_usable_models_reads_model_id_field() {
+        let mut details = field_str(1, "gpt-5.4-medium");
+        details.extend(field_str(4, "GPT-5.4"));
+        let response = field_ld(1, &details);
+        let models = decode_usable_models_response(&response).unwrap();
+        assert_eq!(models, vec!["gpt-5.4-medium".to_string()]);
+
+        // Connect unary framing (flag 0 + BE length + payload).
+        let framed = encode_connect_frame(&response, 0);
+        let models = decode_usable_models_response(&framed).unwrap();
+        assert_eq!(models, vec!["gpt-5.4-medium".to_string()]);
+    }
+
+    #[test]
+    fn enrich_not_found_mentions_model() {
+        let err = enrich_cursor_stream_error(
+            SamplingError::StreamError {
+                error_type: "not_found".into(),
+                message: "Error".into(),
+            },
+            "gpt-5.4-medium",
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("gpt-5.4-medium"));
+        assert!(msg.contains("not_found"));
+        assert!(!err.is_retryable());
     }
 }

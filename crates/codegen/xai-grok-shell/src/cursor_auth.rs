@@ -148,6 +148,20 @@ pub fn is_logged_in() -> bool {
         || load_credentials().ok().flatten().is_some()
 }
 
+/// Best-effort Cursor access token for AgentService RPCs (Bearer).
+///
+/// Prefer this over the Cloud Agents API key when calling
+/// `GetUsableModels` / `Run`. Env overrides win over `cursor-auth.json`.
+pub fn access_token() -> Option<String> {
+    if let Some(token) = process_auth_token_override() {
+        return Some(token);
+    }
+    load_credentials()
+        .ok()
+        .flatten()
+        .map(|creds| creds.access_token)
+}
+
 /// Return an auth-required error that callers can distinguish from an ordinary
 /// session-load failure without parsing user-facing prose.
 pub fn auth_required_error() -> anyhow::Error {
