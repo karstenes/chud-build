@@ -1,0 +1,122 @@
+# Cursor OAuth login
+
+This fork accepts an **isolated Cursor OAuth** account beside xAI, following the
+same credential-separation pattern that
+[open-grok](https://github.com/mweinbach/open-grok) uses for ChatGPT Codex.
+
+## Commands
+
+| Command | Effect |
+| --- | --- |
+| `grok login --cursor` | Browser PKCE login (`loginDeepControl` + `/auth/poll`) |
+| `NO_OPEN_BROWSER=1 grok login --cursor` | Print the URL; do not open a browser |
+| `grok logout --cursor` | Delete `~/.grok/cursor-auth.json` only |
+| `grok logout --all` | Cursor logout, then xAI logout |
+| `/login cursor` | TUI browser login (does not change xAI ACP auth) |
+| `/logout cursor` | TUI Cursor logout |
+
+Bare `grok login` / `grok logout` remain xAI-only.
+
+## xAI login is optional
+
+This fork does **not** require an xAI account to start the TUI. When there is
+no xAI API key or cached `auth.json` session, ACP advertises a non-interactive
+`none` (or `cursor` if Cursor OAuth is already present) method first so the
+welcome screen skips the forced grok.com login. You can still run
+`grok login` / `/login` later for xAI models.
+
+| Startup credentials | First auth method | Forced login? |
+| --- | --- | --- |
+| xAI API key / BYOK | `xai.api_key` | No |
+| xAI session (`auth.json`) | `cached_token` | No |
+| Cursor only | `cursor` | No |
+| Nothing | `none` | No (xAI login optional) |
+
+`--force-login` still opens the xAI login flow. Enterprise
+`preferred_method = oidc|api_key` pins keep their fail-closed behavior.
+
+## Credential isolation
+
+| Store | Path | Owner |
+| --- | --- | --- |
+| xAI primary | `$GROK_HOME/auth.json` | `AuthManager` |
+| Cursor OAuth | `$GROK_HOME/cursor-auth.json` | `cursor_auth` |
+
+Rules:
+
+1. Cursor login/refresh/logout never read or write xAI `auth.json`.
+2. Cursor tokens are never installed into the process-wide ACP auth cell.
+3. Explicit env overrides (`CURSOR_API_KEY`, `GROK_CURSOR_API_KEY`,
+   `CURSOR_AUTH_TOKEN`, `GROK_CURSOR_AUTH_TOKEN`) stay process-local.
+4. Trusted agent endpoint override: `GROK_CURSOR_AGENT_BASE_URL`
+   (defaults to `https://agentn.global.api5.cursor.sh`).
+5. Auth API override: `GROK_CURSOR_AUTH_BASE_URL`
+   (defaults to `https://api2.cursor.sh`).
+
+## Implementation map
+
+- `crates/codegen/xai-grok-shell/src/cursor_auth.rs` — store, PKCE login, refresh,
+  logout, `CursorBearerResolver`, proactive refresh
+- `crates/codegen/xai-grok-shell/src/cursor_models.rs` — catalog entries + live
+  `AgentService/GetUsableModels` merge (Bearer); safe composer fallback only
+  (never Cloud Agents `api.cursor.com/v0/models`)
+- `crates/codegen/xai-grok-sampler/src/cursor_agent.rs` — text-only Connect/HTTP2
+  `AgentService/Run` streaming (`ApiBackend::CursorAgent`)
+- CLI: `crates/codegen/xai-grok-pager/src/app/cli.rs`,
+  `crates/codegen/xai-grok-pager-bin/src/main.rs`
+- TUI: `/login cursor`, `/logout cursor`, `Effect::LoginCursor` /
+  `Effect::LogoutCursor`
+
+## Sampling
+
+Cursor models in `default_models.json` use `"api_backend": "cursor_agent"` and
+`"agent_type": "cursor"`. They appear in the picker only when Cursor is logged
+in (`cursor-auth.json` or `CURSOR_API_KEY`). Inference goes to
+`https://agentn.global.api5.cursor.sh` over HTTP/2 Connect protobuf
+(`AgentService/Run`); tools are deferred (text-only first cut).
+
+Compound GetUsableModels / Cloud Agents slugs (`cursor-grok-4.5-high-fast`)
+are collapsed to a **base** picker entry (e.g. `cursor-grok-4.5`, wire model
+`grok-4.5`) with a `reasoning_efforts` menu. Use **`/effort`** or **`/reasoning`**
+to change the level — same UX as xAI Responses `grok-4.5`. At Run time we send
+base id + ModelDetails `effort` / `fast` params (ACP/SDK shape). Bare models
+like `composer-2.5` and `gemini-3.1-pro` have no effort menu. Auto is `default`.
+
+At startup we prefer `GetUsableModels` with the OAuth bearer so the picker only
+offers models this account can run; Connect `not_found` / `invalid_argument` /
+auth codes fail fast (no 15× retry loop). We never seed the picker from Cloud
+Agents `api.cursor.com/v0/models` — that list advertises ids AgentService
+rejects.
+
+### Pulling / refreshing Cursor models
+
+There is no separate CLI “pull models” command. The agent pulls automatically:
+
+1. On agent startup when Cursor credentials exist
+2. After `/login cursor` / `/logout cursor` (ACP `x.ai/internal/reload_cursor_models`)
+3. After a successful xAI catalog refresh
+
+Check `~/.grok/logs/` (or sampling/unified logs) for
+`merged Cursor models from AgentService GetUsableModels` (includes a `models=`
+preview) vs `GetUsableModels failed; using safe composer fallback`. If
+discovery fails you only get composer / Auto — not a speculative GPT/Claude/Grok
+list.
+
+If a model is missing from that live list, AgentService will not run it for
+this login even if Cursor IDE / Cloud Agents shows it. Stick to ids from the
+GetUsableModels preview (composer and whatever else that line lists).
+
+Credentials are resolved via `CursorBearerResolver` and never through xAI
+`AuthManager`.
+
+## OAuth contract
+
+1. Generate PKCE verifier/challenge and a login UUID.
+2. Open
+   `https://cursor.com/loginDeepControl?challenge=…&uuid=…&mode=login&redirectTarget=cli`.
+3. Poll `GET https://api2.cursor.sh/auth/poll?uuid=…&verifier=…` until tokens
+   arrive (404 = pending).
+4. Persist camelCase `{ accessToken, refreshToken?, apiKey? }` with `0600`
+   permissions.
+5. Refresh with `POST /auth/refresh` using the refresh token as Bearer; keep the
+   old refresh token when the response omits a replacement.

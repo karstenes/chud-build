@@ -1,4 +1,5 @@
-//! `/effort` — set reasoning effort on the current model without re-picking it.
+//! `/effort` (alias `/reasoning`) — set reasoning effort on the current model
+//! without re-picking it.
 //!
 //! Thin wrapper over `Action::SwitchModel` with the session's current model
 //! id and the chosen effort (same wire path as `/model <name> <effort>`).
@@ -13,6 +14,11 @@ pub struct EffortCommand;
 impl SlashCommand for EffortCommand {
     fn name(&self) -> &str {
         "effort"
+    }
+
+    fn aliases(&self) -> &[&str] {
+        // Users often say "reasoning" for the same control.
+        &["reasoning"]
     }
 
     fn description(&self) -> &str {
@@ -288,6 +294,11 @@ mod tests {
             }
             other => panic!("expected SwitchModel with remapped effort, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn aliases_include_reasoning() {
+        assert_eq!(EffortCommand.aliases(), &["reasoning"]);
     }
 
     #[test]

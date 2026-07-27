@@ -726,6 +726,44 @@ pub(crate) async fn generate_session_compact(
                 itl_max_ms: timing.itl_max_ms(),
             }
         }
+        ApiBackend::CursorAgent => {
+            // Text-only AgentService/Run: tools are deferred, so compact with a
+            // plain conversation collect (no tool_choice / hosted tools).
+            let request = ConversationRequest {
+                items: chat_history,
+                tools: vec![],
+                hosted_tools: vec![],
+                model: Some(sampling_config.model.to_owned()),
+                temperature: Some(1.0),
+                x_grok_conv_id: Some(session_id.to_string()),
+                x_grok_req_id: Some(format!("xai-compact-{}", uuid::Uuid::new_v4())),
+                x_grok_session_id: Some(session_id.to_string()),
+                x_grok_agent_id: Some(xai_grok_telemetry::id::agent_id()),
+                ..Default::default()
+            };
+            tracing::info!(
+                compact_model = %sampling_config.model,
+                num_messages = num_messages,
+                "Sending compact request (Cursor agent wire)"
+            );
+            let timing = StreamTiming::new();
+            match client.conversation_collect(request).await {
+                Ok(response) => {
+                    let content = response.assistant_text();
+                    let stop_reason = response.stop_reason.map(|sr| sr.as_str().to_owned());
+                    CompactOutput {
+                        content,
+                        stop_reason,
+                        truncated: false,
+                        ttft_ms: timing.ttft_ms(),
+                        stream_ms: timing.stream_ms(),
+                        delta_count: timing.count,
+                        itl_max_ms: timing.itl_max_ms(),
+                    }
+                }
+                Err(e) => return Err(classify_sampling_error(e)),
+            }
+        }
     };
     if output.content.is_empty() {
         Err(CompactFailure::Transient(

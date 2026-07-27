@@ -962,6 +962,7 @@ mod tests {
             // Realistic enterprise user: no cached session token, default `grok.com`
             // login (no enterprise OIDC).
             has_cached_token: false,
+            has_cursor_auth: false,
             has_enterprise_oidc: false,
             enterprise_oidc_issuer: None,
             login_label: None,

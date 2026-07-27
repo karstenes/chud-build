@@ -211,7 +211,21 @@ impl From<&SamplingError> for SamplingErrorInfo {
                 )
             }
             SamplingError::EventStreamError(_) => (SamplingErrorKind::Http, None, None, None),
-            SamplingError::StreamError { .. } => (SamplingErrorKind::Api, None, None, None),
+            SamplingError::StreamError { error_type, .. } => {
+                // Map deterministic Connect codes to HTTP-ish statuses so
+                // synthesize_from_info does not default them to 500 (retryable).
+                let status = match error_type.as_str() {
+                    "not_found" => Some(404),
+                    "unauthenticated" => Some(401),
+                    "permission_denied" => Some(403),
+                    "invalid_argument" | "failed_precondition" | "out_of_range" => Some(400),
+                    "resource_exhausted" => Some(429),
+                    "unimplemented" => Some(501),
+                    "unavailable" => Some(503),
+                    _ => None,
+                };
+                (SamplingErrorKind::Api, status, None, None)
+            }
             SamplingError::IdleTimeout { .. } => (SamplingErrorKind::IdleTimeout, None, None, None),
             SamplingError::EmptyResponse { .. } => {
                 (SamplingErrorKind::EmptyResponse, None, None, None)
@@ -353,7 +367,19 @@ mod tests {
         let info = SamplingErrorInfo::from(&err);
         assert_eq!(info.kind, SamplingErrorKind::Api);
         assert_eq!(info.status_code, None);
-        assert!(info.is_retryable, "stream errors should be retryable");
+        assert!(info.is_retryable, "transient stream errors should be retryable");
+    }
+
+    #[test]
+    fn stream_error_not_found_classified_as_non_retryable_404() {
+        let err = SamplingError::StreamError {
+            error_type: "not_found".into(),
+            message: "Error".into(),
+        };
+        let info = SamplingErrorInfo::from(&err);
+        assert_eq!(info.kind, SamplingErrorKind::Api);
+        assert_eq!(info.status_code, Some(404));
+        assert!(!info.is_retryable, "Connect not_found must not retry");
     }
 
     #[test]

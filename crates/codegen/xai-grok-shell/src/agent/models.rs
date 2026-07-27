@@ -299,6 +299,10 @@ impl ModelsManager {
         if has_prefetched {
             mgr.inner.catalog.write().has_fetched_real_catalog = true;
         }
+        // Cursor catalog merge is independent of the xAI `/v1/models` fetch.
+        // Without this, GetUsableModels never runs when remote prefetch fails
+        // or when the user only has Cursor credentials.
+        mgr.spawn_refresh_cursor_models();
         Ok(mgr)
     }
 
@@ -367,6 +371,7 @@ impl ModelsManager {
         }
 
         self.notify_models_updated();
+        self.spawn_refresh_cursor_models();
     }
 
     /// [`Self::apply_config`] plus an unconditional default re-resolve, for remote-settings arrival while no session exists.
@@ -1111,7 +1116,56 @@ impl ModelsManager {
             return false;
         };
         self.apply_catalog(config, new_prefetched, new_etag);
+        self.spawn_refresh_cursor_models();
         true
+    }
+
+    /// Schedule a background Cursor model pull + ACP `models/update` notify.
+    ///
+    /// No-op when no Tokio runtime is available (unit tests constructing a
+    /// manager outside async). Callers on the agent path always have a runtime.
+    pub fn spawn_refresh_cursor_models(&self) {
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            tracing::debug!("skip Cursor model refresh: no Tokio runtime");
+            return;
+        };
+        let mgr = self.clone();
+        handle.spawn(async move {
+            mgr.refresh_cursor_models().await;
+        });
+    }
+
+    /// Merge live Cursor AgentService model ids and notify clients.
+    ///
+    /// No-op merge when Cursor is not logged in (still notifies so the picker
+    /// hides Cursor entries after logout). Failures keep bundled fallback
+    /// entries from [`resolve_model_list`].
+    pub async fn refresh_cursor_models(&self) {
+        if crate::cursor_auth::is_logged_in() {
+            let mut models = self.inner.catalog.read().models.clone();
+            let before = models.len();
+            crate::cursor_models::merge_live_cursor_catalog(&mut models).await;
+            let after = models.len();
+            self.inner.catalog.write().models = models;
+            tracing::info!(
+                before,
+                after,
+                "Cursor model catalog refreshed"
+            );
+        }
+        self.notify_models_updated();
+    }
+
+    /// Merge live Cursor model ids into the in-memory catalog (no-op when not
+    /// logged into Cursor). Prefer [`refresh_cursor_models`] so clients are
+    /// notified.
+    pub async fn merge_live_cursor_models(&self) {
+        if !crate::cursor_auth::is_logged_in() {
+            return;
+        }
+        let mut models = self.inner.catalog.read().models.clone();
+        crate::cursor_models::merge_live_cursor_catalog(&mut models).await;
+        self.inner.catalog.write().models = models;
     }
 
     pub fn allowlist_excludes_all(&self) -> bool {

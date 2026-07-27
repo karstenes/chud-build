@@ -1955,11 +1955,24 @@ async fn async_main(args: PagerArgs) -> Result<()> {
             Command::Login {
                 legacy: _,
                 oauth,
+                cursor,
                 device_auth,
                 devbox,
             } => {
                 init_tracing_simple("cli");
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
+                if cursor {
+                    let no_browser = std::env::var_os("NO_OPEN_BROWSER").is_some();
+                    let account = xai_grok_shell::cursor_auth::run_cli_login(no_browser).await?;
+                    let label = account
+                        .email
+                        .as_deref()
+                        .or(account.user_id.as_deref())
+                        .unwrap_or("Cursor account");
+                    println!("Connected Cursor as {label}.");
+                    println!();
+                    xai_grok_shell::instrumentation::finalize_and_exit(0);
+                }
                 let config = xai_grok_shell::config::load_effective_config_disk_only()
                     .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
                 let config = AgentConfig::new_from_toml_cfg(&config)
@@ -1968,8 +1981,22 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 println!();
                 xai_grok_shell::instrumentation::finalize_and_exit(0);
             }
-            Command::Logout => {
+            Command::Logout { cursor, all } => {
                 init_tracing_simple("cli");
+                if cursor || all {
+                    let removed = xai_grok_shell::cursor_auth::run_cli_logout().await?;
+                    println!(
+                        "{}",
+                        if removed {
+                            "Signed out of Cursor."
+                        } else {
+                            "Cursor was not signed in."
+                        }
+                    );
+                    if cursor {
+                        xai_grok_shell::instrumentation::finalize_and_exit(0);
+                    }
+                }
                 let config = xai_grok_shell::config::load_effective_config_disk_only()
                     .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
                 let config = AgentConfig::new_from_toml_cfg(&config)

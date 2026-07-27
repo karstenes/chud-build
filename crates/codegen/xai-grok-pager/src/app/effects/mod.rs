@@ -84,6 +84,29 @@ pub(crate) fn execute(
                     TaskResult::LogoutComplete
                 });
         }
+        Effect::LoginCursor { agent_id } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let result = xai_grok_shell::cursor_auth::run_tui_login()
+                    .await
+                    .map_err(|error| sanitize_user_error(&format!("{error:#}")));
+                if result.is_ok() {
+                    let _ = request_reload_cursor_models(&tx).await;
+                }
+                TaskResult::CursorLoginComplete { agent_id, result }
+            });
+        }
+        Effect::LogoutCursor { agent_id } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let result = xai_grok_shell::cursor_auth::run_cli_logout()
+                    .await
+                    .map_err(|error| sanitize_user_error(&format!("{error:#}")));
+                // Always ask the agent to refresh so Cursor entries disappear.
+                let _ = request_reload_cursor_models(&tx).await;
+                TaskResult::CursorLogoutComplete { agent_id, result }
+            });
+        }
         Effect::CancelAuth { request_seq } => {
             let tx = acp_tx.clone();
             tasks.spawn(async move { send_auth_cancel(&tx, request_seq).await });

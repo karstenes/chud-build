@@ -20,6 +20,40 @@ pub(super) fn dispatch_logout(_app: &mut AppView) -> Vec<Effect> {
     vec![Effect::Logout]
 }
 
+fn active_agent_id(app: &AppView) -> Option<AgentId> {
+    match app.active_view {
+        ActiveView::Agent(id) => Some(id),
+        _ => None,
+    }
+}
+
+/// `/login cursor` -- connect Cursor OAuth without mutating xAI ACP auth.
+pub(super) fn dispatch_login_cursor(app: &mut AppView) -> Vec<Effect> {
+    let agent_id = active_agent_id(app);
+    if let Some(agent_id) = agent_id
+        && let Some(agent) = app.agents.get_mut(&agent_id)
+    {
+        agent.scrollback.push_block(RenderBlock::system(
+            "Opening your browser to connect Cursor…",
+        ));
+    }
+    vec![Effect::LoginCursor { agent_id }]
+}
+
+/// `/logout cursor` -- clear only the isolated Cursor credential store.
+pub(super) fn dispatch_logout_cursor(app: &mut AppView) -> Vec<Effect> {
+    vec![Effect::LogoutCursor {
+        agent_id: active_agent_id(app),
+    }]
+}
+
+/// `/logout all` -- clear Cursor credentials, then run the normal xAI logout.
+pub(super) fn dispatch_logout_all_providers(app: &mut AppView) -> Vec<Effect> {
+    let mut effects = dispatch_logout_cursor(app);
+    effects.extend(dispatch_logout(app));
+    effects
+}
+
 /// Ensure `login_method_id` is populated from stored auth methods.
 /// On the eager-auth path (cached token), login_method_id is never set
 /// because the user skipped the login screen.

@@ -13,6 +13,7 @@
 //! - `x.ai/internal/reload_skills`          skills file watcher fan-out
 //! - `x.ai/internal/reload_models`          model list hot-reload from config.toml
 //! - `x.ai/internal/reload_models_cache`    model catalog hot-reload from disk cache
+//! - `x.ai/internal/reload_cursor_models`   pull Cursor GetUsableModels + notify
 //! - `x.ai/internal/auth_cleared`           auth hot-clear cleanup
 //! - `x.ai/plugins/reload`                  rebuild shared plugin registry
 //! - `x.ai/commands/list`                   list slash commands
@@ -48,6 +49,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         "x.ai/internal/reload_workflows" => handle_reload_workflows(agent),
         "x.ai/internal/reload_models" => handle_reload_models(agent),
         "x.ai/internal/reload_models_cache" => handle_reload_models_cache(agent),
+        "x.ai/internal/reload_cursor_models" => handle_reload_cursor_models(agent),
         "x.ai/internal/auth_cleared" => handle_auth_cleared(agent),
         "x.ai/plugins/reload" => handle_plugins_reload(agent).await,
         "x.ai/commands/list" => handle_commands_list(agent, args).await,
@@ -606,6 +608,21 @@ fn handle_reload_models_cache(agent: &MvpAgent) -> ExtResult {
     ExtMethodResult::success(serde_json::json!({ "reloaded": true }))
         .to_ext_response()
         .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+}
+
+/// Pull Cursor AgentService usable models (or fallback) and notify pickers.
+///
+/// Called after `/login cursor` / `/logout cursor` so the model list updates
+/// without restarting the agent.
+fn handle_reload_cursor_models(agent: &MvpAgent) -> ExtResult {
+    agent.models_manager.spawn_refresh_cursor_models();
+    let logged_in = crate::cursor_auth::is_logged_in();
+    ExtMethodResult::success(serde_json::json!({
+        "scheduled": true,
+        "cursorLoggedIn": logged_in,
+    }))
+    .to_ext_response()
+    .map_err(|e| acp::Error::internal_error().data(e.to_string()))
 }
 
 fn handle_auth_cleared(agent: &MvpAgent) -> ExtResult {

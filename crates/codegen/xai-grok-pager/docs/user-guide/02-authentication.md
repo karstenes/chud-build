@@ -35,9 +35,12 @@ Running `grok login` starts the sign-in flow again, replacing your cached sessio
 | Flag | Description |
 |------|-------------|
 | `--oauth` | Sign in through SpaceXAI OAuth at `auth.x.ai`. This is the default, so the flag is optional. |
-| `--device-auth` (alias `--device-code`) | Sign in with the device-code flow for headless or remote environments. |
+| `--cursor` | Sign in to a separate Cursor account with Cursor OAuth. Credentials are stored in `~/.grok/cursor-auth.json` and never mix with xAI `auth.json`. |
+| `--device-auth` (alias `--device-code`) | Sign in with the device-code flow for headless or remote environments (xAI only). |
 
-To sign out, run `grok logout`. It takes no flags and clears your cached credentials.
+To sign out of xAI, run `grok logout`. To sign out of Cursor only, run `grok logout --cursor`. To clear both, run `grok logout --all`.
+
+In the TUI, use `/login cursor` or `/logout cursor` for the isolated Cursor account.
 
 ---
 

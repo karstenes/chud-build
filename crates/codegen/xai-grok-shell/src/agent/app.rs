@@ -370,6 +370,9 @@ pub async fn run_stdio_agent(
             let auth_manager = Arc::new(agent_config.create_auth_manager());
             // Proactive token refresh; runs until process exit.
             auth_manager.start_proactive_refresh(tokio_util::sync::CancellationToken::new());
+            // Isolated Cursor OAuth refresh; never touches xAI AuthManager.
+            crate::cursor_auth::start_proactive_refresh(tokio_util::sync::CancellationToken::new());
+            let _ = crate::cursor_auth::fresh_credentials().await;
             // Pause refreshes across system sleep so an OIDC refresh can't straddle a
             // suspend (which can revoke the refresh token and force re-login).
             // `grok agent stdio` is a local/interactive entrypoint (spawned by
@@ -591,6 +594,8 @@ async fn run_headless_inner(
                 let auth_manager = shared_auth_manager;
                 // Proactive token refresh for the headless agent.
                 auth_manager.start_proactive_refresh(agent_cancel.clone());
+                // Isolated Cursor OAuth refresh; never touches xAI AuthManager.
+                crate::cursor_auth::start_proactive_refresh(agent_cancel.clone());
                 // Restore managed policy right before bootstrap reads it (no stale window after relay setup).
                 crate::managed_config::ensure_managed_policy_present(&auth_manager).await;
                 let mut agent =
@@ -1271,6 +1276,8 @@ pub async fn run_leader(
     let shared_auth_manager = Arc::new(agent_config_for_spawn.create_auth_manager());
     // Proactive token refresh for the leader; cancelled on shutdown.
     shared_auth_manager.start_proactive_refresh(cancel_clone.clone());
+    // Isolated Cursor OAuth refresh; never touches xAI AuthManager.
+    crate::cursor_auth::start_proactive_refresh(cancel_clone.clone());
     // Pause refreshes across system sleep on this local (laptop) leader
     // process so a refresh can't straddle a suspend.
     shared_auth_manager.start_system_power_listener();

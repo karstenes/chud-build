@@ -706,6 +706,20 @@ mod tests {
     }
 
     #[test]
+    fn classify_stream_error_not_found_is_fatal() {
+        let err = SamplingError::StreamError {
+            error_type: "not_found".into(),
+            message: "Error".into(),
+        };
+        match classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::Fatal(SamplingError::StreamError { error_type, .. }) => {
+                assert_eq!(error_type, "not_found");
+            }
+            other => panic!("expected Fatal(not_found), got {other:?}"),
+        }
+    }
+
+    #[test]
     fn classify_idle_timeout_is_fatal() {
         let err = SamplingError::IdleTimeout { elapsed_secs: 300 };
         match classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD) {

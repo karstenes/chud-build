@@ -441,30 +441,41 @@ impl SessionActor {
         let creds = self.chat_state_handle.get_credentials().await;
         let model_facts = self.model_auth_facts(cfg.model.as_str());
         let auth_method = self.auth_method_id.load();
+        let use_cursor_resolver = cfg.api_backend.is_cursor_agent();
         let gate =
             SessionTokenAuthGate::new(auth_method.as_deref(), model_facts.byok, &cfg.base_url);
-        let use_bearer_resolver = gate.active();
+        let use_bearer_resolver = !use_cursor_resolver && gate.active();
         self.log_auth_gate_unknown("reconstruct_full_config", gate, &cfg.base_url);
         if use_bearer_resolver && let Some(am) = self.auth_manager.as_ref() {
             let _ = am.auth().await;
         }
-        let api_key = if use_bearer_resolver {
+        let api_key = if use_cursor_resolver {
+            use xai_grok_sampler::BearerResolver as _;
+            crate::cursor_auth::CursorBearerResolver::default().current_bearer()
+        } else if use_bearer_resolver {
             self.auth_manager
                 .as_ref()
                 .and_then(|am| am.current_wire_valid().map(|a| a.key))
         } else {
             creds.api_key
         };
-        let auth_scheme = model_facts.auth_scheme;
+        let auth_scheme = if use_cursor_resolver {
+            xai_grok_sampler::AuthScheme::Bearer
+        } else {
+            model_facts.auth_scheme
+        };
         let mut extra_headers = cfg.extra_headers;
-        crate::agent::config::inject_url_derived_headers(
-            &mut extra_headers,
-            creds.alpha_test_key.as_deref(),
-            &cfg.base_url,
-        );
+        if !use_cursor_resolver {
+            crate::agent::config::inject_url_derived_headers(
+                &mut extra_headers,
+                creds.alpha_test_key.as_deref(),
+                &cfg.base_url,
+            );
+        }
         let compaction_at_tokens = self.compaction_at_tokens.get();
         let compactions_remaining = self.compactions_remaining.get();
-        if compactions_remaining.is_some() || compaction_at_tokens.is_some() {
+        if !use_cursor_resolver && (compactions_remaining.is_some() || compaction_at_tokens.is_some())
+        {
             let has_compaction_summary = self
                 .chat_state_handle
                 .get_last_compaction_prompt_index()
@@ -486,9 +497,25 @@ impl SessionActor {
                 extra_headers.insert("x-compaction-at".to_string(), value.to_string());
             }
         }
+        let base_url = if use_cursor_resolver {
+            if crate::cursor_auth::is_trusted_agent_base_url(&cfg.base_url)
+                && !cfg.base_url.trim().is_empty()
+            {
+                cfg.base_url
+            } else {
+                crate::cursor_auth::agent_base_url()
+            }
+        } else {
+            cfg.base_url
+        };
+        let client_version = if use_cursor_resolver {
+            Some(crate::cursor_auth::CURSOR_CLIENT_VERSION.to_string())
+        } else {
+            creds.client_version
+        };
         SamplingConfig {
             api_key,
-            base_url: cfg.base_url,
+            base_url,
             model: cfg.model,
             max_completion_tokens: cfg.max_completion_tokens,
             temperature: cfg.temperature,
@@ -499,7 +526,7 @@ impl SessionActor {
             query_params: cfg.query_params.clone(),
             env_http_headers: cfg.env_http_headers.clone(),
             context_window: cfg.context_window.get(),
-            client_version: creds.client_version,
+            client_version,
             reasoning_effort: cfg.reasoning_effort,
             force_http1: false,
             max_retries: Some(self.max_retries),
@@ -509,15 +536,23 @@ impl SessionActor {
             deployment_id: crate::managed_config::resolve_deployment_id(
                 crate::managed_config::resolve_deployment_key().as_deref(),
             ),
-            user_id: self
-                .auth_manager
-                .as_ref()
-                .and_then(|am| am.current_or_expired())
-                .filter(|a| a.is_xai_auth())
-                .map(|a| a.user_id),
+            user_id: if use_cursor_resolver {
+                None
+            } else {
+                self.auth_manager
+                    .as_ref()
+                    .and_then(|am| am.current_or_expired())
+                    .filter(|a| a.is_xai_auth())
+                    .map(|a| a.user_id)
+            },
             origin_client: self.origin_client.clone(),
             attribution_callback: self.attribution_callback.clone(),
-            bearer_resolver: if use_bearer_resolver {
+            bearer_resolver: if use_cursor_resolver {
+                Some(
+                    std::sync::Arc::new(crate::cursor_auth::CursorBearerResolver::default())
+                        as xai_grok_sampler::SharedBearerResolver,
+                )
+            } else if use_bearer_resolver {
                 self.auth_manager
                     .as_ref()
                     .map(|am| -> xai_grok_sampler::SharedBearerResolver {
