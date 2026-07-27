@@ -138,6 +138,15 @@ pub fn stream_cursor_agent(
 
         let url = format!("{}{}", base_url.trim_end_matches('/'), AGENT_PATH);
         let wire_request_id = uuid::Uuid::new_v4().to_string();
+        tracing::info!(
+            target: crate::sampling_log::TARGET,
+            event = "cursor_agent_post",
+            url = %url,
+            model = %model,
+            client_version = %client_version,
+            wire_request_id = %wire_request_id,
+            "Cursor AgentService/Run POST"
+        );
         let response = match client
             .post(&url)
             .bearer_auth(token)
@@ -158,6 +167,13 @@ pub fn stream_cursor_agent(
             Err(error) => {
                 let _ = stop_tx.send(());
                 let _ = sender.await;
+                tracing::warn!(
+                    target: crate::sampling_log::TARGET,
+                    event = "cursor_agent_http_error",
+                    model = %model,
+                    error = %error,
+                    "Cursor AgentService/Run HTTP send failed"
+                );
                 let err = SamplingError::Http(error);
                 yield SamplingEvent::Failed {
                     request_id: request_id.clone(),
@@ -179,6 +195,14 @@ pub fn stream_cursor_agent(
                 .text()
                 .await
                 .unwrap_or_else(|_| format!("HTTP {status}"));
+            tracing::warn!(
+                target: crate::sampling_log::TARGET,
+                event = "cursor_agent_http_status",
+                model = %model,
+                status = status.as_u16(),
+                message = %message.chars().take(500).collect::<String>(),
+                "Cursor AgentService/Run non-success status"
+            );
             let err = if status.as_u16() == 401 || status.as_u16() == 403 {
                 SamplingError::Auth(message)
             } else {
@@ -289,8 +313,22 @@ pub fn stream_cursor_agent(
                 Err(_) => {
                     if got_text {
                         // Server waits for tool exec we never send — end turn.
+                        tracing::info!(
+                            target: crate::sampling_log::TARGET,
+                            event = "cursor_agent_idle_end",
+                            model = %model,
+                            content_len = content_acc.len(),
+                            "Cursor agent idle after text; ending text-only turn"
+                        );
                         pending.push_back(TurnEvent::End);
                     } else {
+                        tracing::warn!(
+                            target: crate::sampling_log::TARGET,
+                            event = "cursor_agent_idle_timeout",
+                            model = %model,
+                            elapsed_secs = FIRST_BYTE_TIMEOUT.as_secs(),
+                            "Cursor agent first-byte idle timeout"
+                        );
                         pending.push_back(TurnEvent::Failed(SamplingError::IdleTimeout {
                             elapsed_secs: FIRST_BYTE_TIMEOUT.as_secs(),
                         }));
@@ -329,6 +367,14 @@ pub fn stream_cursor_agent(
         }
 
         if let Some(err) = failure {
+            tracing::warn!(
+                target: crate::sampling_log::TARGET,
+                event = "cursor_agent_failed",
+                model = %model,
+                error = %err,
+                content_len = content_acc.len(),
+                "Cursor agent turn failed"
+            );
             yield SamplingEvent::Failed {
                 request_id: request_id.clone(),
                 error: SamplingErrorInfo::from(&err),
@@ -339,6 +385,15 @@ pub fn stream_cursor_agent(
         let stream_end = Instant::now();
         let metrics =
             InferenceLatencyStats::from_timestamps(stream_start, &chunk_timestamps, stream_end);
+        tracing::info!(
+            target: crate::sampling_log::TARGET,
+            event = "cursor_agent_completed",
+            model = %model,
+            content_len = content_acc.len(),
+            message_chunks = message_chunk_count,
+            got_text,
+            "Cursor agent turn completed"
+        );
         let response = ConversationResponse {
             items: vec![ConversationItem::assistant_with_model(
                 content_acc,

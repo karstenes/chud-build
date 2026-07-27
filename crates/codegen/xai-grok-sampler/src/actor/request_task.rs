@@ -827,6 +827,16 @@ fn emit_retrying(
     err: &SamplingError,
 ) {
     let info = SamplingErrorInfo::from(err);
+    tracing::warn!(
+        target: crate::sampling_log::TARGET,
+        event = "retrying",
+        request_id = %request_id,
+        attempt,
+        max_retries,
+        kind = ?info.kind,
+        reason = %err,
+        "sampling request retrying"
+    );
     let _ = event_tx.send(SamplingEvent::Retrying {
         request_id: request_id.clone(),
         attempt,
