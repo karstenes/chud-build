@@ -82,6 +82,21 @@ The binary artifact is named `xai-grok-pager`; official installs ship it as
 `grok`. On first launch it opens your browser to authenticate — see the
 [authentication guide](crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md).
 
+### Cursor OAuth (optional)
+
+In addition to xAI sign-in, this tree accepts an isolated Cursor OAuth login
+(same separation pattern as [open-grok](https://github.com/mweinbach/open-grok)'s
+ChatGPT Codex account):
+
+```sh
+grok login --cursor          # browser PKCE via cursor.com/loginDeepControl
+grok logout --cursor         # clear ~/.grok/cursor-auth.json only
+grok logout --all            # clear both xAI and Cursor credentials
+```
+
+In the TUI, use `/login cursor` and `/logout cursor`. Cursor credentials never
+enter xAI `auth.json` or the primary ACP auth cell.
+
 ## Documentation
 
 Full online documentation is available at

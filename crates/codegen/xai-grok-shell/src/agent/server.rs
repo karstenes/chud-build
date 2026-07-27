@@ -304,6 +304,8 @@ async fn run_persistent_agent(
     let auth_manager = Arc::new(agent_config.create_auth_manager());
     // Proactive token refresh; runs until process exit.
     auth_manager.start_proactive_refresh(tokio_util::sync::CancellationToken::new());
+    // Isolated Cursor OAuth refresh; never touches xAI AuthManager.
+    crate::cursor_auth::start_proactive_refresh(tokio_util::sync::CancellationToken::new());
     // Restore managed policy right before bootstrap reads it — the agent is created lazily here,
     // so an earlier restore could go stale before the gate.
     crate::managed_config::ensure_managed_policy_present(&auth_manager).await;

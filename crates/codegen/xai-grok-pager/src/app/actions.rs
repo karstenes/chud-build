@@ -634,10 +634,16 @@ pub enum Action {
     PermissionCancel,
     /// Log out: remove credentials and return to the login screen.
     Logout,
+    /// Sign out of the isolated Cursor OAuth store without touching xAI auth.
+    LogoutCursor,
+    /// Sign out of both xAI and the isolated Cursor OAuth store.
+    LogoutAllProviders,
     /// Log out and immediately start a new login flow.
     SwitchAccount,
     /// User pressed login on the welcome screen.
     Login,
+    /// Connect the isolated Cursor OAuth account without changing xAI auth.
+    LoginCursor,
     /// Cancel an in-progress login that was started from inside a session
     /// (`/login` or a 401 re-auth prompt) and return to the previous view.
     /// Distinct from `Quit`: abandoning a mid-session re-auth must not exit
@@ -1952,6 +1958,14 @@ pub enum Effect {
     },
     /// Log out via `x.ai/auth/logout` (shell clears auth.json + in-memory state).
     Logout,
+    /// Browser OAuth for the isolated Cursor credential store.
+    LoginCursor {
+        agent_id: Option<AgentId>,
+    },
+    /// Clear the isolated Cursor credential store.
+    LogoutCursor {
+        agent_id: Option<AgentId>,
+    },
     /// Cancel an in-flight interactive auth on the shell (`x.ai/auth/cancel`).
     /// Used when the user abandons mid-session `/login` so the device-code
     /// poll stops instead of running until the code expires. `request_seq`
@@ -2686,6 +2700,16 @@ pub enum TaskResult {
     },
     /// Shell acknowledged logout (auth cleared).
     LogoutComplete,
+    /// Isolated Cursor OAuth login finished.
+    CursorLoginComplete {
+        agent_id: Option<AgentId>,
+        result: Result<xai_grok_shell::cursor_auth::CursorAccountSummary, String>,
+    },
+    /// Isolated Cursor OAuth logout finished.
+    CursorLogoutComplete {
+        agent_id: Option<AgentId>,
+        result: Result<bool, String>,
+    },
     /// Best-effort `x.ai/auth/cancel` finished (no UI update; state already left Authenticating).
     AuthCancelComplete,
     /// Shell responded to `x.ai/auth/check_subscription`. `verify` echoes

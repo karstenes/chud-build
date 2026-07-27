@@ -1117,6 +1117,46 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             app.welcome_prompt_focused = false;
             effects
         }
+        TaskResult::CursorLoginComplete { agent_id, result } => {
+            let message = match result {
+                Ok(account) => {
+                    let label = account
+                        .email
+                        .as_deref()
+                        .or(account.user_id.as_deref())
+                        .unwrap_or("Cursor account");
+                    format!("Connected Cursor as {label}.")
+                }
+                Err(error) => format!("Cursor login failed: {error}"),
+            };
+            if let Some(agent_id) = agent_id
+                && let Some(agent) = app.agents.get_mut(&agent_id)
+            {
+                agent
+                    .scrollback
+                    .push_block(crate::scrollback::block::RenderBlock::system(message));
+            } else {
+                app.show_toast(&message);
+            }
+            vec![]
+        }
+        TaskResult::CursorLogoutComplete { agent_id, result } => {
+            let message = match result {
+                Ok(true) => "Signed out of Cursor.".to_owned(),
+                Ok(false) => "Cursor was not signed in.".to_owned(),
+                Err(error) => format!("Cursor logout failed: {error}"),
+            };
+            if let Some(agent_id) = agent_id
+                && let Some(agent) = app.agents.get_mut(&agent_id)
+            {
+                agent
+                    .scrollback
+                    .push_block(crate::scrollback::block::RenderBlock::system(message));
+            } else {
+                app.show_toast(&message);
+            }
+            vec![]
+        }
         TaskResult::DeepSearchResults { results, seq } => {
             handle_deep_search_results(app, results, seq)
         }

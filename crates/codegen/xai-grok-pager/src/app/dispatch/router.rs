@@ -1,6 +1,7 @@
 //! Top-level action router: maps actions and action results to handlers.
 use super::auth::{
-    dispatch_cancel_login, dispatch_login, dispatch_logout, dispatch_submit_auth_code,
+    dispatch_cancel_login, dispatch_login, dispatch_login_cursor, dispatch_logout,
+    dispatch_logout_all_providers, dispatch_logout_cursor, dispatch_submit_auth_code,
     dispatch_switch_account,
 };
 use super::billing::dispatch_open_supergrok_url;
@@ -1022,6 +1023,8 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::PermissionFollowup(text) => dispatch_permission_followup(app, text),
         Action::PermissionCancel => dispatch_permission_cancel(app),
         Action::Logout => dispatch_logout(app),
+        Action::LogoutCursor => dispatch_logout_cursor(app),
+        Action::LogoutAllProviders => dispatch_logout_all_providers(app),
         Action::SwitchAccount => dispatch_switch_account(app),
         Action::CheckSubscription => vec![Effect::CheckSubscription { verify: None }],
         Action::OpenSupergrokUrl => dispatch_open_supergrok_url(app),
@@ -1073,6 +1076,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             vec![]
         }
         Action::Login => dispatch_login(app),
+        Action::LoginCursor => dispatch_login_cursor(app),
         Action::CancelLogin => dispatch_cancel_login(app),
         Action::SubmitAuthCode(code) => dispatch_submit_auth_code(app, code),
         Action::CopyAuthUrl => {

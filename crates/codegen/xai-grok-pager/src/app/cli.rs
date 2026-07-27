@@ -20,20 +20,30 @@ pub enum Command {
     /// Manage running leader processes
     Leader(LeaderMgmtArgs),
     /// Sign out and clear cached credentials
-    Logout,
+    Logout {
+        /// Sign out of the separate Cursor account instead of xAI.
+        #[arg(long, conflicts_with = "all")]
+        cursor: bool,
+        /// Sign out of both xAI and Cursor.
+        #[arg(long, conflicts_with = "cursor")]
+        all: bool,
+    },
     /// Sign in to Grok
     Login {
         /// Ignored (kept for backwards compatibility). OAuth2 is now the only auth method.
         #[arg(long, hide = true)]
         legacy: bool,
         /// Use Grok OAuth via auth.x.ai.
-        #[arg(long = "oauth", alias = "oidc", conflicts_with_all = ["device_auth"])]
+        #[arg(long = "oauth", alias = "oidc", conflicts_with_all = ["device_auth", "cursor"])]
         oauth: bool,
+        /// Sign in to the separate Cursor account with Cursor OAuth.
+        #[arg(long, conflicts_with_all = ["oauth", "device_auth"])]
+        cursor: bool,
         /// Use device-code authentication for headless/remote environments.
         #[arg(
             long = "device-auth",
             visible_alias = "device-code",
-            conflicts_with_all = ["oauth"]
+            conflicts_with_all = ["oauth", "cursor"]
         )]
         device_auth: bool,
         /// Authenticate for remote development environments (hidden).
@@ -1337,8 +1347,47 @@ mod tests {
     #[test]
     fn subcommand_takes_precedence_over_positional_prompt() {
         let args = PagerArgs::try_parse_from(["grok", "logout"]).expect("subcommand parses");
-        assert!(matches!(args.command, Some(Command::Logout)));
+        assert!(matches!(
+            args.command,
+            Some(Command::Logout {
+                cursor: false,
+                all: false
+            })
+        ));
         assert!(args.prompt.is_none());
+    }
+
+    #[test]
+    fn cursor_account_flags_parse_without_changing_bare_xai_behavior() {
+        let login = PagerArgs::try_parse_from(["grok", "login", "--cursor"])
+            .expect("Cursor login parses");
+        assert!(matches!(
+            login.command,
+            Some(Command::Login {
+                cursor: true,
+                oauth: false,
+                device_auth: false,
+                ..
+            })
+        ));
+        let logout =
+            PagerArgs::try_parse_from(["grok", "logout", "--cursor"]).expect("Cursor logout parses");
+        assert!(matches!(
+            logout.command,
+            Some(Command::Logout {
+                cursor: true,
+                all: false
+            })
+        ));
+        let logout_all =
+            PagerArgs::try_parse_from(["grok", "logout", "--all"]).expect("logout --all parses");
+        assert!(matches!(
+            logout_all.command,
+            Some(Command::Logout {
+                cursor: false,
+                all: true
+            })
+        ));
     }
     #[test]
     fn positional_prompt_conflicts_with_headless_single() {
