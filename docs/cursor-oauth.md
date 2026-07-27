@@ -75,9 +75,11 @@ in (`cursor-auth.json` or `CURSOR_API_KEY`). Inference goes to
 `https://agentn.global.api5.cursor.sh` over HTTP/2 Connect protobuf
 (`AgentService/Run`); tools are deferred (text-only first cut).
 
-Model ids must be AgentService **wire** ids (for example `gpt-5.4-medium`,
-`claude-4.6-sonnet-medium`, `composer-2.5`). Short aliases like `sonnet-4.6`
-fail Run with Connect `not_found`. Auto is `default`. At startup we prefer
+Model ids must be AgentService **wire** ids (for example `grok-4.5-high`,
+`gpt-5.4-medium`, `claude-4.6-sonnet-medium`, `composer-2.5`). Cloud Agents /
+IDE slugs like `cursor-grok-4.5-high` are normalized by stripping the
+`cursor-` prefix before `Run`. Short aliases like `sonnet-4.6` fail with
+Connect `not_found`. Auto is `default`. At startup we prefer
 `GetUsableModels` with the OAuth bearer so the picker only offers models this
 account can run; Connect `not_found` / `invalid_argument` / auth codes fail
 fast (no 15× retry loop).
@@ -93,7 +95,11 @@ There is no separate CLI “pull models” command. The agent pulls automaticall
 Check `~/.grok/logs/` (or sampling/unified logs) for
 `merged Cursor models from AgentService GetUsableModels` vs
 `GetUsableModels failed; falling back`. If discovery fails you still get the
-bundled fallback list (composer / gpt-5.4-* / claude-4.6-*).
+bundled fallback list (composer / grok-4.5-* / gpt-5.4-* / claude-4.6-*).
+
+If you previously selected `cursor-grok-4.5-high` and got Connect `not_found`,
+switch to **`grok-4.5-high`** (or re-login / restart so the catalog rewrite
+runs). Composer (`composer-2.5`) remains the most reliable free-tier option.
 
 Credentials are resolved via `CursorBearerResolver` and never through xAI
 `AuthManager`.

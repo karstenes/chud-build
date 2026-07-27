@@ -48,13 +48,19 @@ pub const DEFAULT_CLIENT_VERSION: &str = "cli-2026.07.08-0c04a8a";
 
 /// Static fallback catalog when live discovery is unreachable.
 ///
-/// IDs must match Cursor AgentService wire ids (`cursor-agent models` /
-/// `GetUsableModels`), not short aliases. Wrong ids fail Run with Connect
-/// `not_found`.
+/// IDs must match Cursor AgentService **wire** ids (after
+/// [`normalize_agent_wire_model_id`]), not Cloud Agents / IDE slugs like
+/// `cursor-grok-4.5-high`. Wrong ids fail Run with Connect `not_found`.
 pub const FALLBACK_MODELS: &[&str] = &[
     "composer-2.5",
     "composer-2-fast",
     "composer-2",
+    "grok-4.5-high",
+    "grok-4.5-medium",
+    "grok-4.5-xhigh",
+    "grok-4.5-high-fast",
+    "grok-4.5-fast-high",
+    "grok-4.5-fast-medium",
     "gpt-5.4-high",
     "gpt-5.4-medium",
     "gpt-5.4-low",
@@ -69,6 +75,47 @@ pub const FALLBACK_MODELS: &[&str] = &[
 /// discovery succeeds.
 pub const LEGACY_ALIAS_MODELS: &[&str] =
     &["sonnet-4.6", "sonnet-4.6-thinking", "opus-4.6"];
+
+/// Exact legacy CLI names that must keep a leading `cursor-` (or be the bare
+/// word `cursor`). Everything else from GetUsableModels / Cloud Agents that
+/// starts with `cursor-` is a display/catalog prefix and must be stripped
+/// before `AgentService/Run` (e.g. `cursor-grok-4.5-high` → `grok-4.5-high`).
+const CURSOR_PREFIX_LEGACY_WIRE_IDS: &[&str] = &[
+    "cursor",
+    "cursor-agent",
+    "cursor-composer",
+    "cursor-composer-fast",
+    "cursor-plan",
+    "cursor-ask",
+];
+
+/// Normalize a catalog / picker id to the AgentService/Run wire id.
+///
+/// - `auto` → `default` (Cursor Auto)
+/// - strip the `cursor-` prefix from GetUsableModels / Cloud Agents slugs
+///   (`cursor-grok-4.5-high` → `grok-4.5-high`), except known legacy CLI names
+pub fn normalize_agent_wire_model_id(model: &str) -> String {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed.eq_ignore_ascii_case("auto") {
+        return "default".to_owned();
+    }
+    if CURSOR_PREFIX_LEGACY_WIRE_IDS
+        .iter()
+        .any(|legacy| trimmed.eq_ignore_ascii_case(legacy))
+    {
+        return trimmed.to_owned();
+    }
+    if let Some(rest) = trimmed.strip_prefix("cursor-") {
+        let rest = rest.trim();
+        if !rest.is_empty() {
+            return rest.to_owned();
+        }
+    }
+    trimmed.to_owned()
+}
 
 const AGENT_PATH: &str = "/agent.v1.AgentService/Run";
 const GET_USABLE_MODELS_PATH: &str = "/agent.v1.AgentService/GetUsableModels";
@@ -108,6 +155,9 @@ pub fn stream_cursor_agent(
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
         };
 
+        // Cloud Agents / GetUsableModels may advertise `cursor-grok-…`; Run
+        // wants the unprefixed wire id (`grok-…`).
+        let model = normalize_agent_wire_model_id(&model);
         let frames = build_run_frames(&prompt, &model, &cwd);
         let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(8);
         let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
@@ -548,11 +598,12 @@ async fn fetch_available_models_inner(
         models: Vec<String>,
     }
     let parsed: CursorModelsResponse = response.json().await.map_err(|e| e.to_string())?;
+    let mut seen = std::collections::HashSet::new();
     Ok(parsed
         .models
         .into_iter()
-        .map(|m| m.trim().to_string())
-        .filter(|m| !m.is_empty())
+        .map(|m| normalize_agent_wire_model_id(&m))
+        .filter(|m| !m.is_empty() && seen.insert(m.clone()))
         .collect())
 }
 
@@ -594,27 +645,37 @@ pub async fn fetch_usable_models(
 }
 
 fn decode_usable_models_response(payload: &[u8]) -> Result<Vec<String>, String> {
-    let body = connect_unary_payload(payload).unwrap_or(payload);
+    let owned;
+    let body: &[u8] = match connect_unary_payload(payload) {
+        Ok(Some(bytes)) => {
+            owned = bytes;
+            &owned
+        }
+        Ok(None) => payload,
+        Err(error) => return Err(error),
+    };
     let mut models = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for field in iter_fields(body) {
         if field.field != 1 || field.wire != 2 {
             continue;
         }
         if let Some(id) = extract_model_details_id(field.data) {
-            let id = id.trim();
-            if !id.is_empty() {
-                models.push(id.to_string());
+            let id = normalize_agent_wire_model_id(&id);
+            if id.is_empty() || !seen.insert(id.clone()) {
+                continue;
             }
+            models.push(id);
         }
     }
     Ok(models)
 }
 
 /// Prefer a Connect unary data frame when present; otherwise treat `payload`
-/// as a raw protobuf body.
-fn connect_unary_payload(payload: &[u8]) -> Option<&[u8]> {
+/// as a raw protobuf body. Supports gzip-compressed Connect frames.
+fn connect_unary_payload(payload: &[u8]) -> Result<Option<Vec<u8>>, String> {
     if payload.len() < 5 {
-        return None;
+        return Ok(None);
     }
     let mut offset = 0;
     while offset + 5 <= payload.len() {
@@ -627,17 +688,20 @@ fn connect_unary_payload(payload: &[u8]) -> Option<&[u8]> {
         ]) as usize;
         let frame_end = offset + 5 + len;
         if frame_end > payload.len() {
-            return None;
-        }
-        if flags & FLAG_GZIP != 0 {
-            return None;
+            return Ok(None);
         }
         if flags & FLAG_END == 0 {
-            return Some(&payload[offset + 5..frame_end]);
+            let frame = &payload[offset + 5..frame_end];
+            if flags & FLAG_GZIP != 0 {
+                return decode_gzip_frame(frame)
+                    .map(Some)
+                    .map_err(|e| format!("GetUsableModels gzip: {e}"));
+            }
+            return Ok(Some(frame.to_vec()));
         }
         offset = frame_end;
     }
-    None
+    Ok(None)
 }
 
 fn extract_model_details_id(model_details: &[u8]) -> Option<String> {
@@ -660,8 +724,9 @@ fn enrich_cursor_stream_error(err: SamplingError, model: &str) -> SamplingError 
             error_type,
             message: format!(
                 "Cursor model '{model}' is not available for this account/session \
-                 (Connect not_found). Pick a model from AgentService GetUsableModels \
-                 (composer-* usually works) or upgrade the Cursor plan that entitles it. \
+                 (Connect not_found). Use AgentService wire ids (e.g. grok-4.5-high, \
+                 composer-2.5) — not Cloud Agents slugs like cursor-grok-*. \
+                 Pick a model from GetUsableModels or upgrade the Cursor plan. \
                  Upstream: {message}"
             ),
         },
@@ -1173,6 +1238,45 @@ mod tests {
         let framed = encode_connect_frame(&response, 0);
         let models = decode_usable_models_response(&framed).unwrap();
         assert_eq!(models, vec!["gpt-5.4-medium".to_string()]);
+    }
+
+    #[test]
+    fn decode_usable_models_strips_cursor_prefix() {
+        let details = field_str(1, "cursor-grok-4.5-high");
+        let response = field_ld(1, &details);
+        let models = decode_usable_models_response(&response).unwrap();
+        assert_eq!(models, vec!["grok-4.5-high".to_string()]);
+    }
+
+    #[test]
+    fn decode_usable_models_gzip_frame() {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use std::io::Write;
+
+        let details = field_str(1, "cursor-grok-4.5-high");
+        let response = field_ld(1, &details);
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&response).unwrap();
+        let gz = encoder.finish().unwrap();
+        let framed = encode_connect_frame(&gz, FLAG_GZIP);
+        let models = decode_usable_models_response(&framed).unwrap();
+        assert_eq!(models, vec!["grok-4.5-high".to_string()]);
+    }
+
+    #[test]
+    fn normalize_wire_id_strips_cloud_agents_prefix() {
+        assert_eq!(
+            normalize_agent_wire_model_id("cursor-grok-4.5-high"),
+            "grok-4.5-high"
+        );
+        assert_eq!(
+            normalize_agent_wire_model_id("cursor-grok-4.5-high-fast"),
+            "grok-4.5-high-fast"
+        );
+        assert_eq!(normalize_agent_wire_model_id("composer-2.5"), "composer-2.5");
+        assert_eq!(normalize_agent_wire_model_id("auto"), "default");
+        assert_eq!(normalize_agent_wire_model_id("cursor-agent"), "cursor-agent");
     }
 
     #[test]

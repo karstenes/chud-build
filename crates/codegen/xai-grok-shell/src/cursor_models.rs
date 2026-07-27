@@ -14,7 +14,7 @@ use indexmap::IndexMap;
 use xai_grok_config_types::LazinessDetectorPerModelConfig;
 use xai_grok_sampler::cursor_agent::{
     DEFAULT_CLIENT_VERSION, FALLBACK_MODELS, LEGACY_ALIAS_MODELS, fetch_available_models,
-    fetch_usable_models,
+    fetch_usable_models, normalize_agent_wire_model_id,
 };
 use xai_grok_sampling_types::ApiBackend;
 
@@ -82,16 +82,52 @@ fn display_name(model_id: &str) -> String {
 }
 
 /// Insert missing Cursor models from `ids` into `catalog` (does not overwrite).
+///
+/// Wire ids are normalized (`cursor-grok-4.5-high` → `grok-4.5-high`) so the
+/// picker never offers Cloud Agents slugs that AgentService/Run rejects.
 pub fn merge_cursor_model_ids(catalog: &mut IndexMap<String, ModelEntry>, ids: &[String]) {
     for id in ids {
-        let id = id.trim();
+        let id = normalize_agent_wire_model_id(id);
         if id.is_empty() || id == "default" {
             continue;
         }
-        if catalog.contains_key(id) {
+        if catalog.contains_key(&id) {
             continue;
         }
-        catalog.insert(id.to_owned(), cursor_model_entry(id));
+        catalog.insert(id.clone(), cursor_model_entry(&id));
+    }
+}
+
+/// Rewrite any Cursor catalog keys that still use a Cloud Agents `cursor-`
+/// prefix so subsequent picker selections hit the Run wire id.
+pub fn normalize_cursor_catalog_keys(catalog: &mut IndexMap<String, ModelEntry>) {
+    let remaps: Vec<(String, String)> = catalog
+        .keys()
+        .filter_map(|key| {
+            let wire = normalize_agent_wire_model_id(key);
+            if wire.is_empty() || wire == *key {
+                None
+            } else {
+                Some((key.clone(), wire))
+            }
+        })
+        .collect();
+    for (old, new) in remaps {
+        if catalog.contains_key(&new) {
+            catalog.shift_remove(&old);
+            continue;
+        }
+        if let Some(mut entry) = catalog.shift_remove(&old) {
+            entry.info.id = Some(new.clone());
+            entry.info.model = new.clone();
+            entry.info.name = Some(display_name(&new));
+            entry.info.description = Some(format!(
+                "{} via Cursor AgentService/Run",
+                display_name(&new)
+            ));
+            entry.info.system_prompt_label = Some(display_name(&new));
+            catalog.insert(new, entry);
+        }
     }
 }
 
@@ -100,6 +136,7 @@ pub fn merge_cursor_fallback_catalog(catalog: &mut IndexMap<String, ModelEntry>)
     if !cursor_auth::is_logged_in() {
         return;
     }
+    normalize_cursor_catalog_keys(catalog);
     // Drop short aliases that AgentService rejects with Connect not_found.
     for alias in LEGACY_ALIAS_MODELS {
         catalog.shift_remove(*alias);
@@ -122,6 +159,9 @@ pub async fn merge_live_cursor_catalog(catalog: &mut IndexMap<String, ModelEntry
     if !cursor_auth::is_logged_in() {
         return;
     }
+
+    // Drop Cloud Agents style keys left over from older builds / secondary catalogs.
+    normalize_cursor_catalog_keys(catalog);
 
     let client = match build_cursor_http_client() {
         Ok(c) => c,
@@ -211,7 +251,11 @@ fn build_cursor_http_client() -> Result<reqwest::Client, reqwest::Error> {
 }
 
 fn prune_unavailable_bundled_cursor(catalog: &mut IndexMap<String, ModelEntry>, usable: &[String]) {
-    let usable: HashSet<&str> = usable.iter().map(|s| s.as_str()).collect();
+    let usable: HashSet<String> = usable
+        .iter()
+        .map(|s| normalize_agent_wire_model_id(s))
+        .filter(|s| !s.is_empty())
+        .collect();
     let mut bundled: HashSet<&str> = FALLBACK_MODELS.iter().copied().collect();
     for alias in LEGACY_ALIAS_MODELS {
         bundled.insert(*alias);
@@ -220,8 +264,12 @@ fn prune_unavailable_bundled_cursor(catalog: &mut IndexMap<String, ModelEntry>, 
         if !(entry.info.api_backend.is_cursor_agent() || entry.info.agent_type == "cursor") {
             return true;
         }
-        if bundled.contains(id.as_str()) || LEGACY_ALIAS_MODELS.contains(&id.as_str()) {
-            return usable.contains(id.as_str());
+        let wire = normalize_agent_wire_model_id(id);
+        if bundled.contains(id.as_str())
+            || bundled.contains(wire.as_str())
+            || LEGACY_ALIAS_MODELS.contains(&id.as_str())
+        {
+            return usable.contains(id.as_str()) || usable.contains(&wire);
         }
         true
     });
@@ -250,6 +298,13 @@ pub fn reinforce_cursor_entry(entry: &mut ModelEntry) {
             entry.info.agent_type = "cursor".to_owned();
         }
         entry.info.supported_in_api = false;
+        let wire = normalize_agent_wire_model_id(&entry.info.model);
+        if !wire.is_empty() && wire != entry.info.model {
+            entry.info.model = wire.clone();
+            entry.info.id = Some(wire.clone());
+            entry.info.name = Some(display_name(&wire));
+            entry.info.system_prompt_label = Some(display_name(&wire));
+        }
         if !cursor_auth::is_trusted_agent_base_url(&entry.info.base_url)
             || entry.info.base_url.trim().is_empty()
         {
@@ -289,6 +344,32 @@ mod tests {
     }
 
     #[test]
+    fn merge_strips_cursor_cloud_agents_prefix() {
+        let mut catalog = IndexMap::new();
+        merge_cursor_model_ids(
+            &mut catalog,
+            &["cursor-grok-4.5-high".to_owned(), "cursor-grok-4.5-high".to_owned()],
+        );
+        assert!(catalog.contains_key("grok-4.5-high"));
+        assert!(!catalog.contains_key("cursor-grok-4.5-high"));
+        assert_eq!(catalog.len(), 1);
+    }
+
+    #[test]
+    fn normalize_catalog_rewrites_prefixed_keys() {
+        let mut catalog = IndexMap::new();
+        catalog.insert(
+            "cursor-grok-4.5-high".to_owned(),
+            cursor_model_entry("cursor-grok-4.5-high"),
+        );
+        normalize_cursor_catalog_keys(&mut catalog);
+        assert!(catalog.contains_key("grok-4.5-high"));
+        assert!(!catalog.contains_key("cursor-grok-4.5-high"));
+        let entry = catalog.get("grok-4.5-high").unwrap();
+        assert_eq!(entry.info.model, "grok-4.5-high");
+    }
+
+    #[test]
     fn prune_removes_unusable_bundled_and_legacy_aliases() {
         let mut catalog = IndexMap::new();
         catalog.insert("composer-2.5".to_owned(), cursor_model_entry("composer-2.5"));
@@ -303,5 +384,19 @@ mod tests {
         assert!(catalog.contains_key("custom-cursor"));
         assert!(!catalog.contains_key("gpt-5.4-medium"));
         assert!(!catalog.contains_key("sonnet-4.6"));
+    }
+
+    #[test]
+    fn prune_accepts_prefixed_usable_ids() {
+        let mut catalog = IndexMap::new();
+        catalog.insert(
+            "grok-4.5-high".to_owned(),
+            cursor_model_entry("grok-4.5-high"),
+        );
+        prune_unavailable_bundled_cursor(
+            &mut catalog,
+            &["cursor-grok-4.5-high".to_owned()],
+        );
+        assert!(catalog.contains_key("grok-4.5-high"));
     }
 }
