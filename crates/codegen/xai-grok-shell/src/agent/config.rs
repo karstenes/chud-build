@@ -3662,7 +3662,11 @@ pub fn resolve_model_list(
     apply_global_scalar_defaults(&mut resolved, &cfg.models);
     for entry in resolved.values_mut() {
         entry.info.derive_reasoning_effort_fields();
+        crate::cursor_models::reinforce_cursor_entry(entry);
     }
+    // When Cursor is logged in, ensure fallback AgentService model ids are
+    // present even if a remote xAI catalog overwrite dropped bundled defaults.
+    crate::cursor_models::merge_cursor_fallback_catalog(&mut resolved);
     resolved
 }
 /// Layer 6 of [`resolve_model_list`]: fold the global `[models].extra_headers`
@@ -3816,11 +3820,20 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
             let context_window = m
                 .context_window
                 .unwrap_or_else(|| NonZeroU64::new(200_000).expect("200000 is non-zero"));
+            let is_cursor = m.api_backend.is_cursor_agent() || m.agent_type == "cursor";
+            let (base_url, api_base_url) = if is_cursor {
+                (crate::cursor_auth::agent_base_url(), None)
+            } else {
+                (
+                    endpoints.resolve_inference_base_url(),
+                    Some(endpoints.xai_api_base_url.clone()),
+                )
+            };
             let config = ModelEntryConfig {
                 id: m.id,
                 model: m.model,
-                base_url: endpoints.resolve_inference_base_url(),
-                api_base_url: Some(endpoints.xai_api_base_url.clone()),
+                base_url,
+                api_base_url,
                 name: m.name,
                 description: m.description,
                 context_window,
@@ -4331,7 +4344,15 @@ impl ModelInfo {
     /// | false    | true               | visible    | visible      |
     /// | false    | false              | visible    | **hidden**   |
     pub fn visible_for_auth(&self, is_session_auth: bool) -> bool {
-        !self.hidden && (is_session_auth || self.supported_in_api)
+        if self.hidden {
+            return false;
+        }
+        // Cursor AgentService models authenticate via isolated Cursor OAuth /
+        // CURSOR_API_KEY, not xAI session vs API-key auth.
+        if self.api_backend.is_cursor_agent() || self.agent_type == "cursor" {
+            return crate::cursor_auth::is_logged_in();
+        }
+        is_session_auth || self.supported_in_api
     }
 }
 /// Flat struct so credential and endpoint fields coexist after deep-merge.
@@ -4780,6 +4801,30 @@ pub(crate) fn first_own_credential(
 /// token > XAI_API_KEY.
 pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> ResolvedCredentials {
     let info = model.info();
+    if info.api_backend.is_cursor_agent() || info.agent_type == "cursor" {
+        use xai_grok_sampler::BearerResolver as _;
+        let api_key = crate::cursor_auth::CursorBearerResolver::default().current_bearer();
+        let base_url = if crate::cursor_auth::is_trusted_agent_base_url(&info.base_url) {
+            if info.base_url.trim().is_empty() {
+                crate::cursor_auth::agent_base_url()
+            } else {
+                info.base_url.clone()
+            }
+        } else {
+            tracing::warn!(
+                model = %info.model,
+                base_url = %info.base_url,
+                "untrusted Cursor agent base_url overridden with configured agent endpoint"
+            );
+            crate::cursor_auth::agent_base_url()
+        };
+        return ResolvedCredentials {
+            api_key,
+            base_url,
+            auth_type: xai_chat_state::AuthType::ApiKey,
+            auth_scheme: AuthScheme::Bearer,
+        };
+    }
     let (api_key, base_url, auth_type) = if let Some(key) = model.own_credential() {
         (
             Some(key),
@@ -5150,6 +5195,19 @@ pub fn sampling_config_for_model(
         &credentials.base_url,
     );
     let api_backend = info.api_backend.clone();
+    let bearer_resolver = if api_backend.is_cursor_agent() {
+        Some(
+            std::sync::Arc::new(crate::cursor_auth::CursorBearerResolver::default())
+                as xai_grok_sampler::SharedBearerResolver,
+        )
+    } else {
+        None
+    };
+    let client_version = if api_backend.is_cursor_agent() {
+        Some(crate::cursor_auth::CURSOR_CLIENT_VERSION.to_string())
+    } else {
+        client_version
+    };
     SamplerConfig {
         api_key: credentials.api_key,
         model: model_name,
@@ -5174,7 +5232,7 @@ pub fn sampling_config_for_model(
         user_id,
         origin_client: None,
         attribution_callback: None,
-        bearer_resolver: None,
+        bearer_resolver,
         supports_backend_search: info.supports_backend_search,
         compactions_remaining: info.compactions_remaining,
         compaction_at_tokens: info.compaction_at_tokens,

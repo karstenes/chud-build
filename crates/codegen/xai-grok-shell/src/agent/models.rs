@@ -1111,7 +1111,25 @@ impl ModelsManager {
             return false;
         };
         self.apply_catalog(config, new_prefetched, new_etag);
+        // Best-effort: expand with live Cursor AgentService model ids when
+        // Cursor OAuth / CURSOR_API_KEY is present. Failures keep the bundled
+        // Cursor fallback entries from resolve_model_list.
+        let mgr = self.clone();
+        tokio::spawn(async move {
+            mgr.merge_live_cursor_models().await;
+        });
         true
+    }
+
+    /// Merge live Cursor model ids into the in-memory catalog (no-op when not
+    /// logged into Cursor).
+    pub async fn merge_live_cursor_models(&self) {
+        if !crate::cursor_auth::is_logged_in() {
+            return;
+        }
+        let mut models = self.inner.catalog.read().models.clone();
+        crate::cursor_models::merge_live_cursor_catalog(&mut models).await;
+        self.inner.catalog.write().models = models;
     }
 
     pub fn allowlist_excludes_all(&self) -> bool {

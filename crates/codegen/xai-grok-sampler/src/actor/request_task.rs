@@ -393,18 +393,27 @@ async fn apply_retry_decision(
             }
 
             // Rebuild client with HTTP/1.1 fallback to escape poisoned
-            // HTTP/2 connection pools.
-            let mut http1_config = config.clone();
-            http1_config.force_http1 = true;
-            match SamplingClient::new(http1_config) {
+            // HTTP/2 connection pools. Cursor AgentService/Run requires
+            // HTTP/2 (ALB returns 464 on HTTP/1.1), so keep HTTP/2 there.
+            let mut rebuild_config = config.clone();
+            if !config.api_backend.is_cursor_agent() {
+                rebuild_config.force_http1 = true;
+            }
+            match SamplingClient::new(rebuild_config) {
                 Ok(fresh) => {
                     *client = fresh;
-                    tracing::info!("rebuilt sampling client with HTTP/1.1 fallback for retry");
+                    if config.api_backend.is_cursor_agent() {
+                        tracing::info!(
+                            "rebuilt Cursor agent sampling client (HTTP/2 retained) for retry"
+                        );
+                    } else {
+                        tracing::info!("rebuilt sampling client with HTTP/1.1 fallback for retry");
+                    }
                 }
                 Err(rebuild_err) => {
                     tracing::warn!(
                         error = %rebuild_err,
-                        "failed to rebuild HTTP/1.1 client for retry; reusing existing client"
+                        "failed to rebuild sampling client for retry; reusing existing client"
                     );
                 }
             }
@@ -537,6 +546,27 @@ async fn run_one_attempt(
             };
             let (teed, captured) = tee_errors(raw);
             let l2 = stream_messages(teed, metadata, request_id.clone(), idle_timeout);
+            drive_l2(
+                l2,
+                request_id,
+                event_tx,
+                cancel_token,
+                captured,
+                None,
+                output_observed,
+            )
+            .await
+        }
+        ApiBackend::CursorAgent => {
+            let captured: ErrorCell = std::sync::Arc::new(std::sync::Mutex::new(None));
+            let l2 = match client.conversation_stream_cursor_agent(
+                request,
+                request_id.clone(),
+                idle_timeout,
+            ) {
+                Ok(stream) => stream,
+                Err(e) => return AttemptOutcome::InitFailed { error: e },
+            };
             drive_l2(
                 l2,
                 request_id,

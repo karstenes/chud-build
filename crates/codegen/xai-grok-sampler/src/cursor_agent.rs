@@ -21,9 +21,6 @@
 //! - Request kept open while reading: frame0 `RunRequest`, frame1 env context,
 //!   paced markers, then `f7:''` heartbeats every 5s
 
-// Public API is intentionally unused until sampler integration wires it up.
-#![allow(dead_code)]
-
 use std::collections::VecDeque;
 use std::io::Read;
 use std::time::{Duration, Instant};
@@ -78,17 +75,20 @@ const FLAG_END: u8 = 0x02;
 // ---------------------------------------------------------------------------
 
 /// Stream Cursor agent turns as sampler events (text-only; tools deferred).
-pub fn stream_cursor_agent<'a>(
-    client: &'a reqwest::Client,
-    token: &'a str,
-    base_url: &'a str,
-    client_version: &'a str,
-    model: &'a str,
-    prompt: &'a str,
-    cwd: &'a str,
+///
+/// Takes owned inputs so the returned stream is `'static` and can be driven by
+/// the sampler actor without tying lifetimes to [`crate::SamplingClient`].
+pub fn stream_cursor_agent(
+    client: reqwest::Client,
+    token: String,
+    base_url: String,
+    client_version: String,
+    model: String,
+    prompt: String,
+    cwd: String,
     request_id: RequestId,
     idle_timeout: Duration,
-) -> impl Stream<Item = SamplingEvent> + Send + 'a {
+) -> impl Stream<Item = SamplingEvent> + Send + 'static {
     async_stream::stream! {
         let stream_start = Instant::now();
         let mut chunk_timestamps: Vec<Instant> = Vec::new();
@@ -98,7 +98,7 @@ pub fn stream_cursor_agent<'a>(
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
         };
 
-        let frames = build_run_frames(prompt, model, cwd);
+        let frames = build_run_frames(&prompt, &model, &cwd);
         let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(8);
         let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
         let sender: JoinHandle<()> = tokio::spawn(async move {

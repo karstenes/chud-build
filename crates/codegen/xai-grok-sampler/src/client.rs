@@ -1965,6 +1965,60 @@ impl SamplingClient {
         self.create_message(wrapper).await
     }
 
+    /// Stream a Cursor `AgentService/Run` turn as sampler events (text-only).
+    ///
+    /// Resolves the bearer from the live [`crate::config::BearerResolver`] when
+    /// wired, otherwise from the construction-time `Authorization` header.
+    /// Cursor inference requires HTTP/2; do not rebuild this client with
+    /// `force_http1`.
+    pub fn conversation_stream_cursor_agent(
+        &self,
+        request: ConversationRequest,
+        request_id: crate::types::RequestId,
+        idle_timeout: std::time::Duration,
+    ) -> Result<impl futures_util::Stream<Item = crate::events::SamplingEvent> + Send + 'static>
+    {
+        let token = if let Some(resolver) = &self.bearer_resolver {
+            resolver.current_bearer()
+        } else {
+            None
+        }
+        .or_else(|| {
+            self.default_headers
+                .get(AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.strip_prefix("Bearer "))
+                .map(|s| s.to_string())
+        })
+        .ok_or_else(|| {
+            SamplingError::Auth(
+                "Cursor authentication required; run `grok login --cursor` or set CURSOR_API_KEY"
+                    .to_string(),
+            )
+        })?;
+
+        let model = request
+            .model
+            .clone()
+            .unwrap_or_else(|| self.defaults.model.clone());
+        let prompt = crate::cursor_agent::build_prompt_from_conversation(&request);
+        let cwd = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| ".".to_string());
+
+        Ok(crate::cursor_agent::stream_cursor_agent(
+            self.http.clone(),
+            token,
+            self.base_url.clone(),
+            crate::cursor_agent::DEFAULT_CLIENT_VERSION.to_string(),
+            model,
+            prompt,
+            cwd,
+            request_id,
+            idle_timeout,
+        ))
+    }
+
     /// Backend-aware streaming call that collects the full response.
     pub async fn conversation_collect(
         &self,
@@ -1988,6 +2042,11 @@ impl SamplingClient {
             ApiBackend::Messages => {
                 let (raw, meta) = self.conversation_stream_messages(request).await?;
                 let events = crate::stream::stream_messages(raw, meta, request_id, idle_timeout);
+                crate::stream::collect_response(events).await
+            }
+            ApiBackend::CursorAgent => {
+                let events =
+                    self.conversation_stream_cursor_agent(request, request_id, idle_timeout)?;
                 crate::stream::collect_response(events).await
             }
         };

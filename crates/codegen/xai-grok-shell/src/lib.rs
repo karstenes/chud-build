@@ -14,6 +14,7 @@ pub mod active_sessions;
 pub mod agent;
 pub mod auth;
 pub mod cursor_auth;
+pub mod cursor_models;
 pub mod builtin;
 pub mod bundle;
 pub mod claude_import;

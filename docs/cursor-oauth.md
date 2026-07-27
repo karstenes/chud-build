@@ -39,10 +39,25 @@ Rules:
 
 - `crates/codegen/xai-grok-shell/src/cursor_auth.rs` — store, PKCE login, refresh,
   logout, `CursorBearerResolver`, proactive refresh
+- `crates/codegen/xai-grok-shell/src/cursor_models.rs` — catalog entries + live
+  `api.cursor.com/v0/models` merge
+- `crates/codegen/xai-grok-sampler/src/cursor_agent.rs` — text-only Connect/HTTP2
+  `AgentService/Run` streaming (`ApiBackend::CursorAgent`)
 - CLI: `crates/codegen/xai-grok-pager/src/app/cli.rs`,
   `crates/codegen/xai-grok-pager-bin/src/main.rs`
 - TUI: `/login cursor`, `/logout cursor`, `Effect::LoginCursor` /
   `Effect::LogoutCursor`
+
+## Sampling
+
+Cursor models in `default_models.json` use `"api_backend": "cursor_agent"` and
+`"agent_type": "cursor"`. They appear in the picker only when Cursor is logged
+in (`cursor-auth.json` or `CURSOR_API_KEY`). Inference goes to
+`https://agentn.global.api5.cursor.sh` over HTTP/2 Connect protobuf
+(`AgentService/Run`); tools are deferred (text-only first cut).
+
+Credentials are resolved via `CursorBearerResolver` and never through xAI
+`AuthManager`.
 
 ## OAuth contract
 

@@ -1018,14 +1018,22 @@ pub enum ApiBackend {
     Responses,
     /// Use the Anthropic Messages API (/v1/messages)
     Messages,
+    /// Use Cursor's Connect/protobuf `AgentService/Run` agent wire.
+    CursorAgent,
 }
 
 impl ApiBackend {
     /// Whether the backend enforces a response JSON schema natively alongside
     /// tool calls. The Messages API does not (a schema there blocks tool use),
     /// so structured output there goes through the StructuredOutput tool.
+    /// Cursor's agent wire is text-oriented and does not support native schemas.
     pub fn supports_native_schema(&self) -> bool {
         matches!(self, Self::ChatCompletions | Self::Responses)
+    }
+
+    /// Whether this backend authenticates with Cursor OAuth rather than xAI.
+    pub fn is_cursor_agent(&self) -> bool {
+        matches!(self, Self::CursorAgent)
     }
 }
 
