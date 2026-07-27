@@ -84,6 +84,10 @@ pub struct AuthMethodsBuildInputs<'a> {
     /// True if a cached session token is available (either present at startup
     /// or recovered via silent refresh).
     pub has_cached_token: bool,
+    /// True if isolated Cursor OAuth credentials are present (`cursor-auth.json`
+    /// / `CURSOR_API_KEY`). Enables a non-interactive `cursor` auth method so
+    /// the pager does not require xAI login.
+    pub has_cursor_auth: bool,
     /// True if enterprise OIDC is configured. Mutually exclusive with the
     /// default `grok.com` method.
     pub has_enterprise_oidc: bool,
@@ -123,14 +127,18 @@ pub struct BuiltAuthMethods {
 /// Unpinned ordering (when each method is enabled):
 /// 1. `xai.api_key`     (if `has_external_api_key`)
 /// 2. `cached_token`    (if `has_cached_token`)
-/// 3. exactly one of:
+/// 3. when neither (1) nor (2): non-interactive fork bypass
+///    - `cursor` if `has_cursor_auth`
+///    - else `none` (xAI login is optional, not required)
+/// 4. exactly one of:
 ///    - `oidc`          (if `has_enterprise_oidc`)
-///    - `grok.com`      (otherwise)
+///    - `grok.com`      (otherwise) — still advertised for optional `/login`
 ///
 /// Unpinned `default_auth_method_id`:
 /// - `cached_token` if `has_cached_token`
 /// - `xai.api_key`  else if `has_external_api_key`
-/// - `None`         otherwise
+/// - `cursor`      else if `has_cursor_auth`
+/// - `none`        otherwise (no xAI credentials)
 ///
 /// Pinned (`preferred_method`):
 /// - `ApiKey`: only `xai.api_key` if available; else empty list + `None` (fail).
@@ -140,6 +148,7 @@ pub fn build_auth_methods(inputs: AuthMethodsBuildInputs<'_>) -> BuiltAuthMethod
     let AuthMethodsBuildInputs {
         has_external_api_key,
         has_cached_token,
+        has_cursor_auth,
         has_enterprise_oidc,
         enterprise_oidc_issuer,
         login_label,
@@ -159,6 +168,7 @@ pub fn build_auth_methods(inputs: AuthMethodsBuildInputs<'_>) -> BuiltAuthMethod
         None => build_unpinned(
             has_external_api_key,
             has_cached_token,
+            has_cursor_auth,
             has_enterprise_oidc,
             enterprise_oidc_issuer,
             login_label,
@@ -217,6 +227,7 @@ fn build_pinned_oidc(
 fn build_unpinned(
     has_external_api_key: bool,
     has_cached_token: bool,
+    has_cursor_auth: bool,
     has_enterprise_oidc: bool,
     enterprise_oidc_issuer: Option<&str>,
     login_label: Option<&str>,
@@ -246,6 +257,22 @@ fn build_unpinned(
                 })),
             );
         }
+    }
+
+    // Fork: do not require interactive xAI login. When no xAI credentials
+    // exist, lead with a non-interactive method so the pager skips the splash.
+    // `grok.com` / `oidc` remain advertised below for optional `/login`.
+    if default_auth_method_id.is_none() {
+        if has_cursor_auth {
+            methods.push(cursor_auth_method());
+            default_auth_method_id = Some(acp::AuthMethodId::new(CURSOR_METHOD_ID));
+        } else {
+            methods.push(none_auth_method());
+            default_auth_method_id = Some(acp::AuthMethodId::new(NONE_METHOD_ID));
+        }
+    } else if has_cursor_auth {
+        // Keep Cursor available as a selectable method beside xAI creds.
+        methods.push(cursor_auth_method());
     }
 
     push_interactive_login(
@@ -291,6 +318,10 @@ pub enum AuthMethodKind {
     CachedToken,
     GrokCom,
     Oidc,
+    /// Isolated Cursor OAuth; non-interactive, not xAI session-based.
+    Cursor,
+    /// No credentials; non-interactive startup so xAI login is optional.
+    None,
     Unknown,
 }
 
@@ -301,6 +332,8 @@ impl AuthMethodKind {
             CACHED_TOKEN_AUTH_METHOD_ID => Self::CachedToken,
             GROK_COM_METHOD_ID => Self::GrokCom,
             OIDC_METHOD_ID => Self::Oidc,
+            CURSOR_METHOD_ID => Self::Cursor,
+            NONE_METHOD_ID => Self::None,
             _ => Self::Unknown,
         }
     }
@@ -446,6 +479,32 @@ pub fn cached_token_auth_method() -> acp::AuthMethod {
     )
 }
 
+pub const CURSOR_METHOD_ID: &str = "cursor";
+pub fn cursor_auth_method() -> acp::AuthMethod {
+    acp::AuthMethod::Agent(
+        acp::AuthMethodAgent::new(
+            acp::AuthMethodId::new(CURSOR_METHOD_ID),
+            "Cursor".to_string(),
+        )
+        .description(Some(
+            "Isolated Cursor OAuth (~/.grok/cursor-auth.json or CURSOR_API_KEY)".to_string(),
+        )),
+    )
+}
+
+pub const NONE_METHOD_ID: &str = "none";
+pub fn none_auth_method() -> acp::AuthMethod {
+    acp::AuthMethod::Agent(
+        acp::AuthMethodAgent::new(
+            acp::AuthMethodId::new(NONE_METHOD_ID),
+            "Continue without xAI login".to_string(),
+        )
+        .description(Some(
+            "Skip xAI login; use Cursor models via `/login cursor` or BYOK".to_string(),
+        )),
+    )
+}
+
 pub const GROK_COM_METHOD_ID: &str = "grok.com";
 
 /// xAI OAuth2/OIDC auth. Method id `"grok.com"` kept for ACP wire-compat.
@@ -563,6 +622,7 @@ mod tests {
         AuthMethodsBuildInputs {
             has_external_api_key: false,
             has_cached_token: false,
+            has_cursor_auth: false,
             has_enterprise_oidc: false,
             enterprise_oidc_issuer: None,
             login_label: None,
@@ -681,17 +741,35 @@ mod tests {
         );
     }
 
-    /// Brand-new user (no API key, no cached token): only `grok.com` is
-    /// advertised, and the pager will (correctly) show the login screen.
-    /// `default_auth_method_id` is None so the pager falls back to the
-    /// advertised login method.
+    /// Brand-new user (no API key, no cached token, no Cursor): lead with
+    /// non-interactive `none` so xAI login is optional; `grok.com` still
+    /// advertised for `/login`.
     #[test]
-    fn fresh_user_only_advertises_grok_com_and_requires_login() {
+    fn fresh_user_leads_with_none_xai_login_optional() {
         let built = build_auth_methods(default_inputs());
 
-        assert_eq!(first_kind(&built.methods), Some(AuthMethodKind::GrokCom));
-        assert!(built.default_auth_method_id.is_none());
-        assert_eq!(built.methods.len(), 1);
+        assert_eq!(first_kind(&built.methods), Some(AuthMethodKind::None));
+        assert!(!AuthMethodKind::None.needs_interactive_login());
+        assert_eq!(default_id(&built), Some(NONE_METHOD_ID));
+        assert!(
+            built
+                .methods
+                .iter()
+                .any(|m| AuthMethodKind::from_id(m.id()) == AuthMethodKind::GrokCom),
+            "grok.com must remain available for optional login"
+        );
+    }
+
+    #[test]
+    fn cursor_auth_leads_when_no_xai_credentials() {
+        let inputs = AuthMethodsBuildInputs {
+            has_cursor_auth: true,
+            ..default_inputs()
+        };
+        let built = build_auth_methods(inputs);
+        assert_eq!(first_kind(&built.methods), Some(AuthMethodKind::Cursor));
+        assert_eq!(default_id(&built), Some(CURSOR_METHOD_ID));
+        assert!(!AuthMethodKind::Cursor.needs_interactive_login());
     }
 
     /// Enterprise OIDC replaces `grok.com` (mutually exclusive). xai.api_key,
@@ -886,11 +964,11 @@ mod tests {
         );
         assert_eq!(
             first_kind(&built.methods),
-            Some(AuthMethodKind::GrokCom),
-            "with api-key auth disabled and no cached token, the login method \
-             must lead so the pager requires interactive login",
+            Some(AuthMethodKind::None),
+            "with api-key auth disabled and no cached token, fork leads with \
+             none so xAI login stays optional",
         );
-        assert!(built.default_auth_method_id.is_none());
+        assert_eq!(default_id(&built), Some(NONE_METHOD_ID));
     }
 
     /// Legacy `GROK_CODE_XAI_API_KEY` env var is accepted as a fallback
@@ -1045,8 +1123,12 @@ mod tests {
         });
         assert_eq!(
             first_kind(&built.methods),
-            Some(AuthMethodKind::GrokCom),
-            "no cached token AND no api key: pager must show login (grok.com first)",
+            Some(AuthMethodKind::None),
+            "no cached token AND no api key: fork leads with none (xAI login optional)",
+        );
+        assert!(
+            !AuthMethodKind::from_id(built.methods[0].id()).needs_interactive_login(),
+            "first method must not force interactive xAI login"
         );
     }
 

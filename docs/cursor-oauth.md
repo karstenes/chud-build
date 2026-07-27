@@ -17,6 +17,24 @@ same credential-separation pattern that
 
 Bare `grok login` / `grok logout` remain xAI-only.
 
+## xAI login is optional
+
+This fork does **not** require an xAI account to start the TUI. When there is
+no xAI API key or cached `auth.json` session, ACP advertises a non-interactive
+`none` (or `cursor` if Cursor OAuth is already present) method first so the
+welcome screen skips the forced grok.com login. You can still run
+`grok login` / `/login` later for xAI models.
+
+| Startup credentials | First auth method | Forced login? |
+| --- | --- | --- |
+| xAI API key / BYOK | `xai.api_key` | No |
+| xAI session (`auth.json`) | `cached_token` | No |
+| Cursor only | `cursor` | No |
+| Nothing | `none` | No (xAI login optional) |
+
+`--force-login` still opens the xAI login flow. Enterprise
+`preferred_method = oidc|api_key` pins keep their fail-closed behavior.
+
 ## Credential isolation
 
 | Store | Path | Owner |

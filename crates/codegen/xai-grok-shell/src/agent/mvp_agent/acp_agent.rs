@@ -396,9 +396,11 @@ impl acp::Agent for MvpAgent {
             Some(crate::auth::PreferredAuthMethod::ApiKey) => false,
             _ => has_cached_token,
         };
+        let has_cursor_auth = crate::cursor_auth::is_logged_in();
         let built = auth_method::build_auth_methods(auth_method::AuthMethodsBuildInputs {
             has_external_api_key,
             has_cached_token,
+            has_cursor_auth,
             has_enterprise_oidc,
             enterprise_oidc_issuer: enterprise_oidc_issuer.as_deref(),
             login_label: login_label.as_deref(),
@@ -416,6 +418,7 @@ impl acp::Agent for MvpAgent {
                 "has_external_api_key": has_external_api_key,
                 "disable_api_key_auth": disable_api_key_auth,
                 "has_cached_token": has_cached_token,
+                "has_cursor_auth": has_cursor_auth,
                 "has_enterprise_oidc": has_enterprise_oidc,
                 "init_has_current": init_has_current,
                 "init_is_expired": init_is_expired,
@@ -583,6 +586,27 @@ impl acp::Agent for MvpAgent {
             }
         }
         match arguments.method_id.0.as_ref() {
+            auth_method::NONE_METHOD_ID => {
+                // Fork: allow sessions without xAI credentials. Inference for
+                // xAI models will still fail until `/login` or an API key;
+                // Cursor models use isolated Cursor OAuth.
+                self.set_auth_method(arguments.method_id.clone());
+                emit_login_span(true, "none", None, None);
+                Ok(Default::default())
+            }
+            auth_method::CURSOR_METHOD_ID => {
+                if !crate::cursor_auth::is_logged_in() {
+                    emit_login_span(false, "cursor", None, Some("not_logged_in"));
+                    return Err(acp::Error::auth_required().data(
+                        "Cursor authentication required; run `grok login --cursor` or `/login cursor`",
+                    ));
+                }
+                self.set_auth_method(arguments.method_id.clone());
+                // Best-effort: expand the picker with GetUsableModels.
+                self.models_manager.spawn_refresh_cursor_models();
+                emit_login_span(true, "cursor", None, None);
+                Ok(Default::default())
+            }
             auth_method::XAI_API_KEY_METHOD_ID => {
                 if self.cfg.borrow().grok_com_config.api_key_auth_disabled() {
                     emit_login_span(false, "api_key", None, Some("disabled_by_admin"));
