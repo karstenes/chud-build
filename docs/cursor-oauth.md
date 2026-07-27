@@ -64,6 +64,19 @@ fail Run with Connect `not_found`. Auto is `default`. At startup we prefer
 account can run; Connect `not_found` / `invalid_argument` / auth codes fail
 fast (no 15× retry loop).
 
+### Pulling / refreshing Cursor models
+
+There is no separate CLI “pull models” command. The agent pulls automatically:
+
+1. On agent startup when Cursor credentials exist
+2. After `/login cursor` / `/logout cursor` (ACP `x.ai/internal/reload_cursor_models`)
+3. After a successful xAI catalog refresh
+
+Check `~/.grok/logs/` (or sampling/unified logs) for
+`merged Cursor models from AgentService GetUsableModels` vs
+`GetUsableModels failed; falling back`. If discovery fails you still get the
+bundled fallback list (composer / gpt-5.4-* / claude-4.6-*).
+
 Credentials are resolved via `CursorBearerResolver` and never through xAI
 `AuthManager`.
 

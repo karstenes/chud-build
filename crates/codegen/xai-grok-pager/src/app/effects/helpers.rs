@@ -668,6 +668,24 @@ pub(super) async fn send_logout(tx: &AcpAgentTx) {
         tracing::warn!(error = %e, "logout failed");
     }
 }
+
+/// Ask the agent to pull Cursor `GetUsableModels` (or hide Cursor entries after
+/// logout) and broadcast an updated picker catalog.
+pub(super) async fn request_reload_cursor_models(tx: &AcpAgentTx) -> Result<(), String> {
+    let req = acp::ExtRequest::new(
+        "x.ai/internal/reload_cursor_models",
+        serde_json::value::to_raw_value(&serde_json::json!({}))
+            .expect("serialize reload_cursor_models params")
+            .into(),
+    );
+    match acp_send(req, tx).await {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            tracing::warn!(error = %e, "reload_cursor_models failed");
+            Err(e.to_string())
+        }
+    }
+}
 /// Best-effort `x.ai/auth/cancel`: stops the shell's device/loopback wait so a
 /// later login is single-flight. Errors are ignored — UI already left
 /// `Authenticating`. `request_seq` scopes the cancel to the abandoned attempt.

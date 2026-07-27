@@ -8,6 +8,7 @@
 
 use std::collections::HashSet;
 use std::num::NonZeroU64;
+use std::time::Duration;
 
 use indexmap::IndexMap;
 use xai_grok_config_types::LazinessDetectorPerModelConfig;
@@ -122,26 +123,17 @@ pub async fn merge_live_cursor_catalog(catalog: &mut IndexMap<String, ModelEntry
         return;
     }
 
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-    {
+    let client = match build_cursor_http_client() {
         Ok(c) => c,
-        Err(_) => {
+        Err(error) => {
+            tracing::warn!(%error, "Cursor model client build failed; using fallback catalog");
             merge_cursor_fallback_catalog(catalog);
             return;
         }
     };
 
     if let Some(token) = cursor_auth::access_token() {
-        match fetch_usable_models(
-            &client,
-            &token,
-            &cursor_auth::agent_base_url(),
-            DEFAULT_CLIENT_VERSION,
-        )
-        .await
-        {
+        match fetch_usable_models_multi_host(&client, &token).await {
             Ok(ids) if !ids.is_empty() => {
                 tracing::info!(
                     count = ids.len(),
@@ -163,6 +155,10 @@ pub async fn merge_live_cursor_catalog(catalog: &mut IndexMap<String, ModelEntry
                 );
             }
         }
+    } else {
+        tracing::warn!(
+            "Cursor is logged in but no access token is available for GetUsableModels"
+        );
     }
 
     if let Some(api_key) = cursor_api_key_for_catalog() {
@@ -171,6 +167,47 @@ pub async fn merge_live_cursor_catalog(catalog: &mut IndexMap<String, ModelEntry
     }
 
     merge_cursor_fallback_catalog(catalog);
+}
+
+/// Try agent host first (same as Run), then auth host (`api2`) used by some
+/// Cursor CLI builds for unary RPCs.
+async fn fetch_usable_models_multi_host(
+    client: &reqwest::Client,
+    token: &str,
+) -> Result<Vec<String>, String> {
+    let bases = [
+        cursor_auth::agent_base_url(),
+        cursor_auth::auth_base_url(),
+    ];
+    let mut last_err = None;
+    for base in bases {
+        match fetch_usable_models(client, token, &base, DEFAULT_CLIENT_VERSION).await {
+            Ok(ids) => {
+                tracing::info!(
+                    base = %base,
+                    count = ids.len(),
+                    "Cursor GetUsableModels succeeded"
+                );
+                return Ok(ids);
+            }
+            Err(error) => {
+                tracing::warn!(base = %base, %error, "Cursor GetUsableModels attempt failed");
+                last_err = Some(error);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| "GetUsableModels: no hosts tried".into()))
+}
+
+fn build_cursor_http_client() -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .connect_timeout(Duration::from_secs(10))
+        .tcp_nodelay(true)
+        .http2_keep_alive_interval(Duration::from_secs(15))
+        .http2_keep_alive_timeout(Duration::from_secs(5))
+        .http2_keep_alive_while_idle(true)
+        .build()
 }
 
 fn prune_unavailable_bundled_cursor(catalog: &mut IndexMap<String, ModelEntry>, usable: &[String]) {
