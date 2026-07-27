@@ -75,15 +75,17 @@ in (`cursor-auth.json` or `CURSOR_API_KEY`). Inference goes to
 `https://agentn.global.api5.cursor.sh` over HTTP/2 Connect protobuf
 (`AgentService/Run`); tools are deferred (text-only first cut).
 
-Model ids must be AgentService **wire** ids (for example `grok-4.5-high`,
-`gpt-5.4-medium`, `claude-4.6-sonnet-medium`, `composer-2.5`). Cloud Agents /
-IDE slugs like `cursor-grok-4.5-high` are normalized by stripping the
-`cursor-` prefix before `Run`. Short aliases like `sonnet-4.6` fail with
-Connect `not_found`. Auto is `default`. At startup we prefer
-`GetUsableModels` with the OAuth bearer so the picker only offers models this
-account can run; Connect `not_found` / `invalid_argument` / auth codes fail
-fast (no 15× retry loop). We never seed the picker from Cloud Agents
-`api.cursor.com/v0/models` — that list advertises ids AgentService rejects.
+Model ids must be AgentService **wire** ids. Catalog/Cloud Agents often use
+compound slugs (`cursor-grok-4.5-high-fast`); at Run time we split those into
+a **base** id plus ModelDetails params (`effort`, `fast`), matching Cursor
+ACP/SDK (`grok-4.5[effort=high,fast=false]`). Bare models like `composer-2.5`
+and `gemini-3.1-pro` have no effort param. Auto is `default`.
+
+At startup we prefer `GetUsableModels` with the OAuth bearer so the picker only
+offers models this account can run; Connect `not_found` / `invalid_argument` /
+auth codes fail fast (no 15× retry loop). We never seed the picker from Cloud
+Agents `api.cursor.com/v0/models` — that list advertises ids AgentService
+rejects.
 
 ### Pulling / refreshing Cursor models
 

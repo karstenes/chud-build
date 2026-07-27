@@ -89,6 +89,23 @@ const CURSOR_PREFIX_LEGACY_WIRE_IDS: &[&str] = &[
     "cursor-ask",
 ];
 
+/// Effort suffixes Cursor bakes into catalog / Cloud Agents compound ids.
+/// Longest-first so `xhigh` wins over `high`. Variants like
+/// `claude-opus-4-8-thinking` keep `thinking` in the base id; only the trailing
+/// effort token is peeled into the `effort` param.
+const CURSOR_EFFORT_SUFFIXES: &[&str] = &["xhigh", "medium", "high", "low", "max", "none"];
+
+/// Resolved AgentService model selection (SDK/ACP style: base id + params).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CursorModelSelection {
+    /// Base model id sent as ModelDetails.model_id (no effort / trailing-fast).
+    pub model_id: String,
+    /// Reasoning effort param (`effort`), when present on the catalog id.
+    pub effort: Option<String>,
+    /// `fast` ModelDetails param.
+    pub fast: bool,
+}
+
 /// Normalize a catalog / picker id to the AgentService/Run wire id.
 ///
 /// - `auto` → `default` (Cursor Auto)
@@ -115,6 +132,60 @@ pub fn normalize_agent_wire_model_id(model: &str) -> String {
         }
     }
     trimmed.to_owned()
+}
+
+/// Split a catalog / compound Cursor id into base model + `effort` / `fast` params.
+///
+/// Cursor ACP/SDK select models as `grok-4.5[effort=high,fast=false]`. Cloud
+/// Agents and some catalogs instead advertise compound slugs like
+/// `cursor-grok-4.5-high-fast`. AgentService ModelDetails wants the **base**
+/// id plus repeated kv params (`effort`, `fast`) — baking effort into the
+/// name is what yields Connect `not_found` for reasoning models while bare
+/// ids like `composer-2.5` / `gemini-3.1-pro` still work.
+pub fn resolve_agent_model_selection(model: &str) -> CursorModelSelection {
+    let mut id = normalize_agent_wire_model_id(model);
+    if id.is_empty() {
+        return CursorModelSelection {
+            model_id: id,
+            effort: None,
+            fast: false,
+        };
+    }
+
+    let mut fast = false;
+
+    // Trailing `-fast` → SDK `fast=true` (composer-2.5-fast, grok-4.5-high-fast).
+    if let Some(rest) = id.strip_suffix("-fast") {
+        if !rest.is_empty() {
+            fast = true;
+            id = rest.to_owned();
+        }
+    }
+
+    let mut effort = None;
+    for suffix in CURSOR_EFFORT_SUFFIXES {
+        let marker = format!("-{suffix}");
+        if let Some(rest) = id.strip_suffix(marker.as_str()) {
+            if rest.is_empty() {
+                continue;
+            }
+            // `grok-4.5-fast-high` → base grok-4.5, effort high, fast true.
+            let (base, nested_fast) = match rest.strip_suffix("-fast") {
+                Some(base) if !base.is_empty() => (base.to_owned(), true),
+                _ => (rest.to_owned(), false),
+            };
+            id = base;
+            effort = Some((*suffix).to_owned());
+            fast = fast || nested_fast;
+            break;
+        }
+    }
+
+    CursorModelSelection {
+        model_id: id,
+        effort,
+        fast,
+    }
 }
 
 const AGENT_PATH: &str = "/agent.v1.AgentService/Run";
@@ -155,10 +226,20 @@ pub fn stream_cursor_agent(
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
         };
 
-        // Cloud Agents / GetUsableModels may advertise `cursor-grok-…`; Run
-        // wants the unprefixed wire id (`grok-…`).
-        let model = normalize_agent_wire_model_id(&model);
-        let frames = build_run_frames(&prompt, &model, &cwd);
+        // Catalog may use compound slugs (`grok-4.5-high-fast`); Run wants
+        // base id + effort/fast ModelDetails params (SDK/ACP shape).
+        let selection = resolve_agent_model_selection(&model);
+        tracing::info!(
+            target: crate::sampling_log::TARGET,
+            event = "cursor_agent_model_selection",
+            catalog_model = %model,
+            wire_model = %selection.model_id,
+            effort = selection.effort.as_deref().unwrap_or(""),
+            fast = selection.fast,
+            "resolved Cursor AgentService model selection"
+        );
+        let model = selection.model_id.clone();
+        let frames = build_run_frames(&prompt, &selection, &cwd);
         let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(8);
         let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
         let sender: JoinHandle<()> = tokio::spawn(async move {
@@ -724,10 +805,9 @@ fn enrich_cursor_stream_error(err: SamplingError, model: &str) -> SamplingError 
             error_type,
             message: format!(
                 "Cursor model '{model}' is not available for this account/session \
-                 (Connect not_found). Use AgentService wire ids (e.g. grok-4.5-high, \
-                 composer-2.5) — not Cloud Agents slugs like cursor-grok-*. \
-                 Pick a model from GetUsableModels or upgrade the Cursor plan. \
-                 Upstream: {message}"
+                 (Connect not_found). Reasoning models need base id + effort/fast \
+                 params (e.g. grok-4.5 with effort=high), not compound Cloud Agents \
+                 slugs. Prefer GetUsableModels ids or composer-2.5. Upstream: {message}"
             ),
         },
         other => other,
@@ -960,18 +1040,29 @@ fn connect_frame(payload: &[u8]) -> Bytes {
     encode_connect_frame(payload, 0)
 }
 
-fn encode_model_meta(name: &str, fast: bool) -> Vec<u8> {
-    let mut out = field_str(1, name);
-    let mut kv = field_str(1, "fast");
-    kv.extend(field_str(2, if fast { "true" } else { "false" }));
-    out.extend(field_ld(3, &kv));
+fn encode_model_param(id: &str, value: &str) -> Vec<u8> {
+    let mut kv = field_str(1, id);
+    kv.extend(field_str(2, value));
+    field_ld(3, &kv)
+}
+
+fn encode_model_meta(selection: &CursorModelSelection) -> Vec<u8> {
+    let mut out = field_str(1, &selection.model_id);
+    if let Some(effort) = selection.effort.as_deref() {
+        out.extend(encode_model_param("effort", effort));
+    }
+    out.extend(encode_model_param(
+        "fast",
+        if selection.fast { "true" } else { "false" },
+    ));
     out
 }
 
 /// Build Connect frames for a text-only agent turn (`mode=AGENT=1`, empty MCP tools).
-fn build_run_frames(prompt: &str, model: &str, cwd: &str) -> Vec<Bytes> {
+fn build_run_frames(prompt: &str, selection: &CursorModelSelection, cwd: &str) -> Vec<Bytes> {
     let conv = uuid::Uuid::new_v4().to_string();
     let msg = uuid::Uuid::new_v4().to_string();
+    let model_meta = encode_model_meta(selection);
 
     // frame 0: field 1 = RunRequest
     // messages: f2 { f1 { f1 { f1:prompt, f2:msg_id, f3:'', f4:1 } } }
@@ -986,10 +1077,10 @@ fn build_run_frames(prompt: &str, model: &str, cwd: &str) -> Vec<Bytes> {
     // f4 = empty mcp_tools (same bytes as field_str(4, ""))
     req.extend(field_str(4, ""));
     req.extend(field_str(5, &conv));
-    req.extend(field_ld(9, &encode_model_meta(model, false)));
+    req.extend(field_ld(9, &model_meta));
     req.extend(field_varint(12, 0));
     req.extend(field_ld(14, &field_str(1, "default")));
-    req.extend(field_ld(14, &encode_model_meta(model, false)));
+    req.extend(field_ld(14, &model_meta));
     req.extend(field_str(16, &conv));
     let frame0 = connect_frame(&field_ld(1, &req));
 
@@ -1152,17 +1243,35 @@ mod tests {
     #[test]
     fn build_run_frames_contains_model_name() {
         // PKCE-independent: frame building only needs prompt/model/cwd.
-        let frames = build_run_frames("PROMPT_MARKER", "composer-2.5", "/tmp");
+        let selection = resolve_agent_model_selection("composer-2.5");
+        let frames = build_run_frames("PROMPT_MARKER", &selection, "/tmp");
         assert!(frames.len() >= 4);
         let hay = String::from_utf8_lossy(&frames[0]);
         assert!(hay.contains("PROMPT_MARKER"));
         assert!(hay.contains("composer-2.5"));
+        assert!(hay.contains("fast"));
         for frame in &frames {
             assert!(frame.len() >= 5);
             let len = u32::from_be_bytes([frame[1], frame[2], frame[3], frame[4]]) as usize;
             assert_eq!(len + 5, frame.len());
             assert_eq!(frame[0], 0);
         }
+    }
+
+    #[test]
+    fn build_run_frames_encodes_effort_param_not_suffix() {
+        let selection = resolve_agent_model_selection("cursor-grok-4.5-high-fast");
+        assert_eq!(selection.model_id, "grok-4.5");
+        assert_eq!(selection.effort.as_deref(), Some("high"));
+        assert!(selection.fast);
+        let frames = build_run_frames("hi", &selection, "/tmp");
+        let hay = String::from_utf8_lossy(&frames[0]);
+        assert!(hay.contains("grok-4.5"));
+        assert!(hay.contains("effort"));
+        assert!(hay.contains("high"));
+        // Must not send the compound catalog slug as the model id.
+        assert!(!hay.contains("grok-4.5-high-fast"));
+        assert!(!hay.contains("cursor-grok"));
     }
 
     #[test]
@@ -1277,6 +1386,50 @@ mod tests {
         assert_eq!(normalize_agent_wire_model_id("composer-2.5"), "composer-2.5");
         assert_eq!(normalize_agent_wire_model_id("auto"), "default");
         assert_eq!(normalize_agent_wire_model_id("cursor-agent"), "cursor-agent");
+    }
+
+    #[test]
+    fn resolve_selection_splits_effort_and_fast() {
+        assert_eq!(
+            resolve_agent_model_selection("cursor-grok-4.5-high"),
+            CursorModelSelection {
+                model_id: "grok-4.5".into(),
+                effort: Some("high".into()),
+                fast: false,
+            }
+        );
+        assert_eq!(
+            resolve_agent_model_selection("grok-4.5-fast-high"),
+            CursorModelSelection {
+                model_id: "grok-4.5".into(),
+                effort: Some("high".into()),
+                fast: true,
+            }
+        );
+        assert_eq!(
+            resolve_agent_model_selection("composer-2.5-fast"),
+            CursorModelSelection {
+                model_id: "composer-2.5".into(),
+                effort: None,
+                fast: true,
+            }
+        );
+        assert_eq!(
+            resolve_agent_model_selection("claude-opus-4-8-thinking-low"),
+            CursorModelSelection {
+                model_id: "claude-opus-4-8-thinking".into(),
+                effort: Some("low".into()),
+                fast: false,
+            }
+        );
+        assert_eq!(
+            resolve_agent_model_selection("gemini-3.1-pro"),
+            CursorModelSelection {
+                model_id: "gemini-3.1-pro".into(),
+                effort: None,
+                fast: false,
+            }
+        );
     }
 
     #[test]
